@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Discovery Results — {{ subnet.name }}{% endblock %}
+{% block content %}
+
+<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+    <div>
+        <h1>🔍 {{ subnet.name }} — Discovery Results</h1>
+        <p>{{ subnet.cidr }}{% if job %} · Scanned {{ job.finished_at | utcfmt if job.finished_at else 'in progress' }}{% endif %}</p>
+    </div>
+    <div style="display:flex;gap:8px;">
+        <a href="{{ url_for('network_discovery.index') }}" class="btn btn-secondary">← Back</a>
+        <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}">
+            <button type="submit" class="btn btn-primary">🔄 Re-scan</button>
+        </form>
+    </div>
+</div>
+
+{% if not job %}
+<div class="card" style="text-align:center;padding:32px;color:var(--text-muted);">
+    No scan data yet. Run a scan from the Discovery page.
+</div>
+{% else %}
+
+<!-- Summary bar -->
+<div class="card">
+    <div style="display:flex;gap:32px;flex-wrap:wrap;">
+        <div>
+            <div style="font-size:28px;font-weight:700;color:var(--primary);">{{ job.hosts_found }}</div>
+            <div style="font-size:12px;color:var(--text-muted);">Total hosts found</div>
+        </div>
+        <div>
+            <div style="font-size:28px;font-weight:700;color:var(--success);">{{ hosts | selectattr('in_kea') | list | length }}</div>
+            <div style="font-size:12px;color:var(--text-muted);">In Kea (known)</div>
+        </div>
+        <div>
+            <div style="font-size:28px;font-weight:700;{% if job.rogue_count > 0 %}color:var(--warning){% else %}color:var(--success){% endif %};">{{ job.rogue_count }}</div>
+            <div style="font-size:12px;color:var(--text-muted);">Rogue (not in Kea)</div>
+        </div>
+        <div>
+            <div style="font-size:13px;color:var(--text-muted);">Status</div>
+            <div style="font-size:13px;{% if job.status == 'done' %}color:var(--success){% else %}color:var(--warning){% endif %};">{{ job.status | title }}</div>
+        </div>
+    </div>
+</div>
+
+<!-- Results table -->
+{% if hosts %}
+<div class="card" style="padding:0;">
+    <div class="card-header" style="padding:16px 20px 12px;">
+        <span class="card-title">Discovered Hosts</span>
+        <div style="display:flex;gap:8px;">
+            <button class="btn btn-sm btn-secondary" onclick="filterTable('all')">All ({{ hosts|length }})</button>
+            <button class="btn btn-sm btn-secondary" onclick="filterTable('rogue')">⚠ Rogue ({{ job.rogue_count }})</button>
+            <button class="btn btn-sm btn-secondary" onclick="filterTable('known')">✓ Known ({{ hosts | selectattr('in_kea') | list | length }})</button>
+        </div>
+    </div>
+    <div class="table-wrap">
+    <table id="results-table">
+        <thead><tr>
+            <th>IP Address</th>
+            <th>Hostname</th>
+            <th>MAC</th>
+            <th>Status</th>
+            <th>Discovered</th>
+        </tr></thead>
+        <tbody>
+        {% for h in hosts %}
+        <tr data-rogue="{{ 'true' if h.rogue else 'false' }}">
+            <td class="mono" style="color:var(--primary);">{{ h.ip }}</td>
+            <td style="font-size:13px;">{{ h.hostname or '—' }}</td>
+            <td class="mono" style="font-size:12px;">{{ h.mac or '—' }}</td>
+            <td>
+                {% if h.rogue %}
+                <span style="color:var(--warning);font-size:12px;">⚠ Rogue</span>
+                {% else %}
+                <span style="color:var(--success);font-size:12px;">✓ In Kea</span>
+                {% endif %}
+            </td>
+            <td style="font-size:12px;color:var(--text-muted);">{{ h.discovered_at | utcfmt if h.discovered_at else '—' }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+<script>
+function filterTable(mode) {
+    document.querySelectorAll('#results-table tbody tr').forEach(function(row) {
+        var rogue = row.getAttribute('data-rogue') === 'true';
+        if (mode === 'all') row.style.display = '';
+        else if (mode === 'rogue') row.style.display = rogue ? '' : 'none';
+        else if (mode === 'known') row.style.display = !rogue ? '' : 'none';
+    });
+}
+</script>
+{% else %}
+<div class="card" style="text-align:center;padding:32px;color:var(--text-muted);">
+    No hosts found in this scan.
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}

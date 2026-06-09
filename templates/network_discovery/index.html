@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Network Discovery{% endblock %}
+{% block content %}
+
+<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+    <div>
+        <h1>🔍 Network Discovery</h1>
+        <p>Scan subnets for devices not in the Kea lease table.</p>
+    </div>
+</div>
+
+{% if not scanner_ok %}
+<div class="alert alert-warning">
+    ⚠️ <strong>No scanner found.</strong> Network Discovery requires nmap or arp-scan on the Jen host.<br>
+    <code style="font-size:12px;">sudo apt install nmap</code>
+</div>
+{% else %}
+<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
+    Scanner: {% if nmap_ok %}✅ nmap{% elif arpscan_ok %}✅ arp-scan{% endif %}
+</div>
+{% endif %}
+
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;">
+{% for subnet_id, info in subnet_map.items() %}
+{% set last = scan_summary.get(subnet_id, {}) %}
+<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
+        <div>
+            <div style="font-weight:600;font-size:14px;">{{ info.name }}</div>
+            <div style="font-size:12px;color:var(--text-muted);">{{ info.cidr }}</div>
+        </div>
+        {% if last.status == 'running' %}
+        <span style="font-size:11px;color:var(--primary);" id="status-{{ subnet_id }}">⏳ Scanning…</span>
+        {% elif last.status == 'done' %}
+        <span style="font-size:11px;color:var(--success);">✓ Done</span>
+        {% elif last.status == 'error' %}
+        <span style="font-size:11px;color:var(--danger);">✗ Error</span>
+        {% else %}
+        <span style="font-size:11px;color:var(--text-muted);">Never scanned</span>
+        {% endif %}
+    </div>
+
+    {% if last.status == 'done' %}
+    <div style="display:flex;gap:20px;margin-bottom:12px;">
+        <div style="text-align:center;">
+            <div style="font-size:22px;font-weight:700;color:var(--primary);">{{ last.hosts_found }}</div>
+            <div style="font-size:11px;color:var(--text-muted);">Hosts found</div>
+        </div>
+        <div style="text-align:center;">
+            <div style="font-size:22px;font-weight:700;{% if last.rogue_count > 0 %}color:var(--warning){% else %}color:var(--success){% endif %};">{{ last.rogue_count }}</div>
+            <div style="font-size:11px;color:var(--text-muted);">Rogue{% if last.rogue_count != 1 %}s{% endif %}</div>
+        </div>
+        <div style="text-align:center;">
+            <div style="font-size:11px;color:var(--text-muted);">Last scan</div>
+            <div style="font-size:11px;color:var(--text);">{{ last.finished_at | utcfmt if last.finished_at else '—' }}</div>
+        </div>
+    </div>
+    <div style="display:flex;gap:8px;">
+        <a href="{{ url_for('network_discovery.results', subnet_id=subnet_id) }}" class="btn btn-sm btn-secondary">View Results</a>
+        {% if scanner_ok %}
+        <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}" style="display:inline;">
+            <button type="submit" class="btn btn-sm btn-primary">🔄 Re-scan</button>
+        </form>
+        {% endif %}
+    </div>
+    {% elif last.status == 'running' %}
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
+        Scan in progress… <span id="dots-{{ subnet_id }}">.</span>
+    </div>
+    <script>
+    (function() {
+        var dots = document.getElementById('dots-{{ subnet_id }}');
+        var i = 0;
+        var t = setInterval(function() {
+            dots.textContent = '.'.repeat(++i % 4 || 1);
+            fetch('/network/discovery/api/scan-status/{{ subnet_id }}')
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (d.status === 'done' || d.status === 'error') {
+                        clearInterval(t);
+                        window.location.reload();
+                    }
+                });
+        }, 3000);
+    })();
+    </script>
+    {% else %}
+    {% if scanner_ok %}
+    <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}">
+        <button type="submit" class="btn btn-sm btn-primary">🔍 Scan Now</button>
+    </form>
+    {% endif %}
+    {% endif %}
+</div>
+{% else %}
+<div class="card" style="text-align:center;padding:32px;color:var(--text-muted);">
+    No accessible subnets found.
+</div>
+{% endfor %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,22 @@
+{
+  "id":           "network-discovery",
+  "name":         "Network Discovery",
+  "version":      "1.0.0",
+  "description":  "Scan your subnets for devices not in the Kea lease table. Detects rogue devices, shows discovered hostnames, and alerts on new unknowns. Requires nmap on the Jen host.",
+  "author":       "Matthew Thibodeau",
+  "requires_jen": "3.6.0",
+  "tags":         ["network", "security", "scanning"],
+  "changelog_url": "https://github.com/ltkojak/jen-kea/blob/main/plugins/network-discovery/CHANGELOG.md",
+  "nav": [
+    {
+      "section":  "network",
+      "label":    "Discovery",
+      "icon":     "🔍",
+      "endpoint": "network_discovery.index"
+    }
+  ],
+  "db_migrations": [
+    "CREATE TABLE IF NOT EXISTS nd_scan_jobs (id INT AUTO_INCREMENT PRIMARY KEY, subnet_id INT NOT NULL, started_at DATETIME DEFAULT CURRENT_TIMESTAMP, finished_at DATETIME DEFAULT NULL, status VARCHAR(20) DEFAULT 'running', hosts_found INT DEFAULT 0, rogue_count INT DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS nd_scan_results (id INT AUTO_INCREMENT PRIMARY KEY, job_id INT NOT NULL, ip VARCHAR(15) NOT NULL, mac VARCHAR(17), hostname VARCHAR(255), in_kea TINYINT(1) DEFAULT 0, rogue TINYINT(1) DEFAULT 0, discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+  ]
+}
