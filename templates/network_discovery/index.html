@@ -59,6 +59,7 @@
         <a href="{{ url_for('network_discovery.results', subnet_id=subnet_id) }}" class="btn btn-sm btn-secondary">View Results</a>
         {% if scanner_ok %}
         <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}" style="display:inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-sm btn-primary">🔄 Re-scan</button>
         </form>
         {% endif %}
@@ -87,6 +88,7 @@
     {% else %}
     {% if scanner_ok %}
     <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button type="submit" class="btn btn-sm btn-primary">🔍 Scan Now</button>
     </form>
     {% endif %}

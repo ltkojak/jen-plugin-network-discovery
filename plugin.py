@@ -105,6 +105,12 @@ def _cross_reference_kea(hosts: list, subnet_id: int) -> list:
     """
     For each discovered host, check if it's in Kea leases or reservations.
     Returns enriched host list with in_kea and rogue flags.
+
+    Matches on IP OR MAC (when the scan method captured one — nmap's
+    -sn output doesn't reliably report MAC, only arp-scan does, so
+    IP-only remains the fallback for nmap results). Without the MAC
+    match, a known device with a MAC in Kea but a currently-different/
+    renewed IP got wrongly flagged "rogue" on every scan.
     """
     kea_ips = set()
     kea_macs = set()
@@ -112,24 +118,29 @@ def _cross_reference_kea(hosts: list, subnet_id: int) -> list:
         kdb = _get_kea_db()
         with kdb.cursor() as cur:
             cur.execute(
-                "SELECT inet_ntoa(address) as ip FROM lease4 WHERE state=0 AND subnet_id=%s",
+                "SELECT inet_ntoa(address) as ip, HEX(hwaddr) as mac_hex FROM lease4 WHERE state=0 AND subnet_id=%s",
                 (subnet_id,)
             )
             for row in cur.fetchall():
                 kea_ips.add(row["ip"])
+                if row.get("mac_hex"):
+                    kea_macs.add(":".join(row["mac_hex"][i:i+2] for i in range(0, 12, 2)).lower())
             cur.execute(
-                "SELECT inet_ntoa(ipv4_address) as ip FROM hosts WHERE dhcp4_subnet_id=%s",
+                "SELECT inet_ntoa(ipv4_address) as ip, HEX(dhcp_identifier) as mac_hex FROM hosts WHERE dhcp4_subnet_id=%s",
                 (subnet_id,)
             )
             for row in cur.fetchall():
                 kea_ips.add(row["ip"])
+                if row.get("mac_hex"):
+                    kea_macs.add(":".join(row["mac_hex"][i:i+2] for i in range(0, 12, 2)).lower())
         kdb.close()
     except Exception as e:
         logger.error(f"Network Discovery: Kea cross-reference error: {e}")
 
     enriched = []
     for host in hosts:
-        in_kea = host["ip"] in kea_ips
+        host_mac = (host.get("mac") or "").lower()
+        in_kea = host["ip"] in kea_ips or (host_mac and host_mac in kea_macs)
         enriched.append({
             **host,
             "in_kea": in_kea,
@@ -342,6 +353,9 @@ def results(subnet_id):
 @login_required
 def api_scan_status(subnet_id):
     """Poll endpoint for scan progress."""
+    from jen.services.access import assert_subnet_access
+    if not assert_subnet_access(subnet_id):
+        return jsonify({"error": "Access denied"}), 403
     try:
         db = _get_db()
         with db.cursor() as cur:

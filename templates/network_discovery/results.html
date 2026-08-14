@@ -10,6 +10,7 @@
     <div style="display:flex;gap:8px;">
         <a href="{{ url_for('network_discovery.index') }}" class="btn btn-secondary">← Back</a>
         <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-primary">🔄 Re-scan</button>
         </form>
     </div>
