@@ -1,12 +1,12 @@
 {
   "id":           "network-discovery",
   "name":         "Network Discovery",
-  "version":      "1.0.1",
+  "version":      "1.0.2",
   "description":  "Scan your subnets for devices not in the Kea lease table. Detects rogue devices, shows discovered hostnames, and alerts on new unknowns. Requires nmap on the Jen host.",
   "author":       "Matthew Thibodeau",
   "requires_jen": "3.6.0",
   "tags":         ["network", "security", "scanning"],
-  "changelog_url": "https://github.com/ltkojak/jen-kea/blob/main/plugins/network-discovery/CHANGELOG.md",
+  "changelog_url": "https://github.com/ltkojak/jen-plugin-network-discovery/blob/main/CHANGELOG.md",
   "nav": [
     {
       "section":  "network",

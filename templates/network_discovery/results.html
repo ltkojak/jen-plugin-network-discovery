@@ -50,9 +50,9 @@
     <div class="card-header" style="padding:16px 20px 12px;">
         <span class="card-title">Discovered Hosts</span>
         <div style="display:flex;gap:8px;">
-            <button class="btn btn-sm btn-secondary" onclick="filterTable('all')">All ({{ hosts|length }})</button>
-            <button class="btn btn-sm btn-secondary" onclick="filterTable('rogue')">⚠ Rogue ({{ job.rogue_count }})</button>
-            <button class="btn btn-sm btn-secondary" onclick="filterTable('known')">✓ Known ({{ hosts | selectattr('in_kea') | list | length }})</button>
+            <button class="btn btn-sm btn-secondary" data-filter-mode="all">All ({{ hosts|length }})</button>
+            <button class="btn btn-sm btn-secondary" data-filter-mode="rogue">⚠ Rogue ({{ job.rogue_count }})</button>
+            <button class="btn btn-sm btn-secondary" data-filter-mode="known">✓ Known ({{ hosts | selectattr('in_kea') | list | length }})</button>
         </div>
     </div>
     <div class="table-wrap">
@@ -84,7 +84,7 @@
     </table>
     </div>
 </div>
-<script>
+<script nonce="{{ csp_nonce }}">
 function filterTable(mode) {
     document.querySelectorAll('#results-table tbody tr').forEach(function(row) {
         var rogue = row.getAttribute('data-rogue') === 'true';
@@ -93,6 +93,10 @@ function filterTable(mode) {
         else if (mode === 'known') row.style.display = !rogue ? '' : 'none';
     });
 }
+document.addEventListener('click', function(e) {
+    var btn = e.target.closest('[data-filter-mode]');
+    if (btn) filterTable(btn.getAttribute('data-filter-mode'));
+});
 </script>
 {% else %}
 <div class="card" style="text-align:center;padding:32px;color:var(--text-muted);">

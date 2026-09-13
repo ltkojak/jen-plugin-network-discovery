@@ -1,0 +1,8 @@
+# Pinned so CI and a dev box agree regardless of any user-level ruff config.
+# Same conservative set jen-kea itself uses: syntax/undefined-name/unused-import
+# class errors only, no style opinions.
+line-length = 120
+target-version = "py310"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

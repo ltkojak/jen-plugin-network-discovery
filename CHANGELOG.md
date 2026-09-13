@@ -1,5 +1,59 @@
 # Network Discovery Plugin — Changelog
 
+## [1.0.2] - 2026-09-13
+
+### Fix: every successful scan was recorded as an error
+
+After a scan found hosts, the job pruned older results with a single
+`DELETE … WHERE job_id IN (SELECT id FROM nd_scan_jobs … ORDER BY
+started_at DESC LIMIT 100)`. MySQL and MariaDB both reject a `LIMIT`
+inside an `IN` subquery ("This version … doesn't yet support 'LIMIT &
+IN/ALL/ANY/SOME subquery'"), so the statement raised right after the
+job row was created — the job was marked `error`, no results were
+stored, and the page showed "✗ Error" for a scan that had actually
+completed. The same code was in the bundled copy inside `jen-kea`, so
+diffing against it (how v1.0.1's bugs were found) couldn't have caught
+this one. The prune now picks the job ids in Python and deletes by
+explicit list, and actually does what the old comment said: keep the
+newest 3 jobs per subnet (including this one), dropping older jobs
+and their results rather than results only.
+
+The scan's error path also closed the DB connection and then closed it
+again in `finally`; harmless on Jen's pooled connections, an exception
+on the raw-connection fallback. Removed the extra close.
+
+### Fix: Content-Security-Policy compatibility (no inline scripts)
+
+Jen v5.22.0 dropped `'unsafe-inline'` from its script-src CSP — every
+`<script>` needs a per-request nonce and inline `onclick=` attributes
+are never executed. The three filter buttons on the results page were
+`onclick=` handlers (so filtering silently did nothing), and both
+`<script>` blocks (the results filter, the per-subnet scan-progress
+poller on the index page) were un-nonce'd — the poller not running is
+why an in-progress scan never refreshed on its own. The buttons now
+carry `data-filter-mode` and one delegated click listener, and both
+scripts carry `nonce="{{ csp_nonce }}"`. This matches the copy bundled
+in `jen-kea` since v5.22.0, which also gained the "IPv4 subnets only"
+note shown when Jen's IPv6 support is enabled — brought over here too.
+
+### Housekeeping
+
+- Blueprint gets an explicit `root_path` (as the bundled copy and IPAM
+  Lite already do), so templates resolve wherever Jen loads the plugin
+  from — including the root-owned `/opt/jen/plugins-installed/` tree
+  a v5.27.0+ install lands in.
+- Dropped unused imports (`json`, `datetime`, `request`,
+  `current_user`).
+- `manifest.json`'s `changelog_url` pointed at the copy of this file
+  bundled inside `jen-kea`; it now points at this repo's own.
+- New CI (`.github/workflows/verify.yml`, `tools/verify.py`): every
+  push and tag checks that `plugin.zip` is byte-for-byte a rebuild of
+  the tree, that no template has an inline handler or un-nonce'd
+  script, that the manifest version matches this file's top entry,
+  and that `plugin.py` compiles and passes ruff. `.gitattributes` pins
+  LF so the zip is built identically on any platform; build it with
+  `python3 tools/verify.py --build`.
+
 ## [1.0.1] - 2026-08-15
 
 ### Fixed: three real bugs found comparing this repo against the bundled reference copy in jen-kea

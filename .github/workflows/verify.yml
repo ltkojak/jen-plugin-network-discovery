@@ -1,0 +1,29 @@
+name: Verify
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install lint/template tooling
+        run: pip install ruff jinja2
+
+      - name: Ruff (pinned rule set in ruff.toml)
+        run: ruff check plugin.py tools/verify.py
+
+      - name: Verify manifest, changelog, templates (CSP), and plugin.zip
+        run: python tools/verify.py

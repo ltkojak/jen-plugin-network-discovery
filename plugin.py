@@ -4,22 +4,25 @@ Scans subnets for devices not in the Kea lease table.
 Requires nmap on the Jen host (sudo apt install nmap).
 """
 import ipaddress
-import json
 import logging
+import os as _os
 import shutil
 import subprocess
 import threading
-from datetime import datetime, timezone
 
 from flask import (Blueprint, flash, jsonify, redirect,
-                   render_template, request, url_for)
-from flask_login import current_user, login_required
+                   render_template, url_for)
+from flask_login import login_required
 
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("network_discovery", __name__,
                template_folder="templates",
+               root_path=_os.path.dirname(_os.path.abspath(__file__)),
                url_prefix="/network/discovery")
+
+# How many scan jobs (and their results) to keep per subnet, newest first.
+_KEEP_JOBS = 3
 
 _scan_lock = threading.Lock()
 
@@ -170,21 +173,28 @@ def _run_scan_job(subnet_id: int, cidr: str) -> int:
                     (job_id,)
                 )
             db.commit()
-            db.close()
             return job_id
 
         hosts = _cross_reference_kea(result["hosts"], subnet_id)
         rogue_count = sum(1 for h in hosts if h["rogue"])
 
-        # Clear old results for this subnet, keep last 3 jobs
+        # Prune this subnet's history down to the newest _KEEP_JOBS jobs
+        # (this one included). v1.0.2: this used to be one DELETE with an
+        # `IN (SELECT ... ORDER BY ... LIMIT 100)` subquery, which MySQL
+        # and MariaDB both refuse ("doesn't yet support LIMIT & IN
+        # subquery") — so every scan that actually found hosts raised
+        # here, right after its INSERT, and was recorded as 'error'.
+        # Pick the ids in Python and delete by explicit list instead.
         with db.cursor() as cur:
-            cur.execute("""
-                DELETE FROM nd_scan_results WHERE job_id IN (
-                    SELECT id FROM nd_scan_jobs
-                    WHERE subnet_id=%s AND id != %s
-                    ORDER BY started_at DESC LIMIT 100
-                )
-            """, (subnet_id, job_id))
+            cur.execute(
+                "SELECT id FROM nd_scan_jobs WHERE subnet_id=%s AND id != %s ORDER BY started_at DESC, id DESC",
+                (subnet_id, job_id),
+            )
+            old_ids = [r["id"] for r in cur.fetchall()][_KEEP_JOBS - 1:]
+            if old_ids:
+                placeholders = ",".join(["%s"] * len(old_ids))
+                cur.execute(f"DELETE FROM nd_scan_results WHERE job_id IN ({placeholders})", old_ids)
+                cur.execute(f"DELETE FROM nd_scan_jobs WHERE id IN ({placeholders})", old_ids)
             for host in hosts:
                 cur.execute("""
                     INSERT INTO nd_scan_results
