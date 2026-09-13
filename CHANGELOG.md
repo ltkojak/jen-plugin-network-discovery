@@ -1,5 +1,14 @@
 # Network Discovery Plugin — Changelog
 
+## [1.0.4] - 2026-09-13
+
+### Housekeeping: explicit migration versions
+
+`db_migrations` now uses Jen's explicit `{version, description, sql}`
+format instead of the flat positional list (both plugins are on it as
+of today). Versions 1 and 2 are exactly the old positions 1 and 2, so
+an existing install runs nothing new. No code or schema changes.
+
 ## [1.0.3] - 2026-09-13
 
 ### Scans now find every host on an attached subnet, with MACs
