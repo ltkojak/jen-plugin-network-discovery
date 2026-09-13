@@ -163,6 +163,22 @@ def check_templates():
         ok(f"{count} template(s) parse; no inline handlers; every <script> nonce'd")
 
 
+def check_line_endings():
+    """The tree is declared LF (.gitattributes) and plugin.zip is built from
+    the tree: a CRLF file here — an editor on Windows, a Python text-mode
+    write — would ship CRLF inside the zip and fail CI's rebuild
+    comparison against an LF checkout. Catch it before the build does."""
+    bad = []
+    for rel in expected_zip_members():
+        with open(os.path.join(ROOT, rel), "rb") as f:
+            if b"\r\n" in f.read():
+                bad.append(rel)
+    for rel in bad:
+        fail(f"{rel} has CRLF line endings — the tree must be LF (see .gitattributes)")
+    if not bad:
+        ok("every zip member is LF")
+
+
 def check_zip():
     members = expected_zip_members()
     path = os.path.join(ROOT, "plugin.zip")
@@ -214,6 +230,7 @@ def main():
     manifest = check_manifest()
     check_changelog(manifest)
     check_templates()
+    check_line_endings()
     check_zip()
     if failures:
         print(f"\n{len(failures)} check(s) failed")
