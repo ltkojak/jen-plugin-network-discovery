@@ -1,5 +1,16 @@
 # Network Discovery Plugin — Changelog
 
+## [1.0.7] - 2026-09-13
+
+### Housekeeping: no dynamically-built SQL in the prune
+
+v1.0.2's prune deleted old jobs with a `WHERE id IN (%s,%s,…)` whose
+placeholder list was built at runtime — parameterised and safe, but
+string-built SQL is exactly what Jen's bandit gate (which scans the
+bundled copy of this plugin) flags. It now deletes each old job with a
+fixed, fully parameterised statement instead; there are at most a
+handful per scan. No functional change.
+
 ## [1.0.6] - 2026-09-13
 
 ### Housekeeping: the IPv4-only README note, back from the bundled copy

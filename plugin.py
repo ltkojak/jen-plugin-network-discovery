@@ -330,11 +330,11 @@ def _run_scan_job(subnet_id, cidr):
                 "SELECT id FROM nd_scan_jobs WHERE subnet_id=%s AND id != %s ORDER BY started_at DESC, id DESC",
                 (subnet_id, job_id),
             )
-            old_ids = [r["id"] for r in cur.fetchall()][_KEEP_JOBS - 1 :]
-            if old_ids:
-                placeholders = ",".join(["%s"] * len(old_ids))
-                cur.execute(f"DELETE FROM nd_scan_results WHERE job_id IN ({placeholders})", old_ids)
-                cur.execute(f"DELETE FROM nd_scan_jobs WHERE id IN ({placeholders})", old_ids)
+            # One fixed, parameterised statement per old job (never more
+            # than a handful) rather than a runtime-built `IN (%s,%s,…)`.
+            for old_id in [r["id"] for r in cur.fetchall()][_KEEP_JOBS - 1 :]:
+                cur.execute("DELETE FROM nd_scan_results WHERE job_id=%s", (old_id,))
+                cur.execute("DELETE FROM nd_scan_jobs WHERE id=%s", (old_id,))
             for host in hosts:
                 cur.execute(
                     """
