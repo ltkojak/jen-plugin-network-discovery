@@ -1,5 +1,69 @@
 # Network Discovery Plugin — Changelog
 
+## [1.0.3] - 2026-09-13
+
+### Scans now find every host on an attached subnet, with MACs
+
+Jen runs as an unprivileged service user, so `nmap -sn` can't send raw
+packets: it degrades to TCP connect() probes against ports 80 and 443
+and never reports a MAC. In practice that meant a scan found only the
+devices with a web server on them and matched them against Kea by IP
+alone — so a device whose lease IP had changed was flagged rogue on
+every scan, and most IoT/embedded devices weren't found at all.
+
+The sweep now probes a wider set of ports (22, 80, 443, 445, 3389,
+8080, 8443, 9100) and, more usefully, reads the kernel neighbour
+table (`ip -4 neigh`) right after it. Every connect() attempt makes
+the kernel ARP for its target first, and every host that exists
+answers ARP whether or not it answers TCP — so on a subnet the Jen
+host is directly attached to, the table holds a fresh REACHABLE entry,
+with MAC, for every live host. Those are merged in: REACHABLE entries
+inside the CIDR become found hosts even when nmap saw nothing, and any
+non-failed entry supplies the MAC for a host nmap did see (a STALE
+entry alone never adds a host — it can outlive the device by hours).
+On a routed subnet there are no entries and behaviour is unchanged.
+With MACs available, the Kea cross-reference works the way v1.0.1
+intended.
+
+### Removed: the arp-scan fallback
+
+It could never have worked: `arp-scan --localnet <cidr>` is a usage
+error (`--localnet` and a target are mutually exclusive), and arp-scan
+needs raw sockets the service user doesn't have. When nmap was absent
+it produced a "done" scan with zero hosts rather than an error. nmap
+is now simply required, and the page says so.
+
+### Alerts fire for *new* unknowns, not every unknown on every scan
+
+The manifest has always said "alerts on new unknowns", but every scan
+alerted on every rogue it found — a permanently unmanaged device paged
+on each run. The alert now lists only rogue IPs the previous completed
+scan of that subnet hadn't already flagged (a first scan reports all
+of them), and passes `subnet_id` so a subnet-scoped alert channel
+filters it like any other per-subnet alert.
+
+### Fix: a scan interrupted by a Jen restart stayed "Scanning…" forever
+
+The scan runs in a background thread; if Jen restarted mid-scan the
+job stayed `running` with nothing left to finish it, the index page
+showed "⏳ Scanning…" indefinitely, and the poller reloaded every three
+seconds for good. A `running` job older than ten minutes is now marked
+`error` on the next page load or scan request. A second scan of a
+subnet that genuinely is mid-scan is refused with a message instead of
+being queued silently behind the first.
+
+### Smaller fixes
+
+- A Kea reservation's `dhcp_identifier` was treated as a MAC whatever
+  its type; only a type-0 (hw-address) identifier is one now, so a
+  6-byte client-id can't accidentally match a scanned MAC.
+- `results` and the scan-status endpoint no longer surface raw
+  exception text; they log it and show a generic message.
+- Dropped the in-tree `.enabled` marker — Jen has kept its enable
+  marker outside the plugin directory since v5.13.0 — and rewrote the
+  README's install instructions, which still described that marker
+  and a path Jen no longer installs to.
+
 ## [1.0.2] - 2026-09-13
 
 ### Fix: every successful scan was recorded as an error

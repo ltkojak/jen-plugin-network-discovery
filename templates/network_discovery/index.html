@@ -10,17 +10,20 @@
 </div>
 
 {% if ipv6_enabled %}
-<div class="alert alert-info">ℹ️ Network Discovery scans IPv4 subnets only — nmap/arp-scan sweeps here don't cover IPv6 space. IPv6 devices show up on <a href="/devices?view=v6">Devices</a> instead, read from Kea's own lease table.</div>
+<div class="alert alert-info">ℹ️ Network Discovery scans IPv4 subnets only — the nmap sweep here doesn't cover IPv6 space. IPv6 devices show up on <a href="/devices?view=v6">Devices</a> instead, read from Kea's own lease table.</div>
 {% endif %}
 
 {% if not scanner_ok %}
 <div class="alert alert-warning">
-    ⚠️ <strong>No scanner found.</strong> Network Discovery requires nmap or arp-scan on the Jen host.<br>
+    ⚠️ <strong>nmap not found.</strong> Network Discovery needs nmap on the Jen host.<br>
     <code style="font-size:12px;">sudo apt install nmap</code>
 </div>
 {% else %}
 <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
-    Scanner: {% if nmap_ok %}✅ nmap{% elif arpscan_ok %}✅ arp-scan{% endif %}
+    Scanner: ✅ nmap, run unprivileged. On a subnet the Jen host is directly attached to, every device that answers
+    ARP is found and its MAC recorded, so a known device keeps matching Kea even after its IP changes. On a routed
+    subnet only hosts answering a common TCP port (22, 80, 443, 445, 3389, 8080, 8443, 9100) are found, without MACs.
+    An alert fires only for unknown devices the previous scan hadn't seen.
 </div>
 {% endif %}
 
