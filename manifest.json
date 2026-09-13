@@ -1,7 +1,7 @@
 {
   "id":           "network-discovery",
   "name":         "Network Discovery",
-  "version":      "1.0.4",
+  "version":      "1.0.5",
   "description":  "Scan your subnets for devices not in the Kea lease table. Finds every live host on an attached subnet (with MAC), flags devices Kea doesn't know, and alerts on new unknowns. Requires nmap on the Jen host.",
   "author":       "Matthew Thibodeau",
   "requires_jen": "3.6.0",

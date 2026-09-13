@@ -1,5 +1,17 @@
 # Network Discovery Plugin — Changelog
 
+## [1.0.5] - 2026-09-13
+
+### Housekeeping: same lint rules as Jen
+
+Jen bundles a byte-for-byte copy of this plugin under
+`jen-kea/plugins/network-discovery/` and lints its whole tree in CI
+with its own, stricter ruff configuration (`ruff check .` and `ruff
+format --check .`). This repo's `ruff.toml` is now identical to Jen's,
+ruff is pinned to the same version in CI, and `plugin.py` is
+reformatted to match — so a resync into Jen can never fail Jen's lint.
+Mechanical only: import ordering and formatting. No functional change.
+
 ## [1.0.4] - 2026-09-13
 
 ### Housekeeping: explicit migration versions

@@ -34,16 +34,18 @@ import shutil
 import subprocess
 import threading
 
-from flask import (Blueprint, flash, jsonify, redirect,
-                   render_template, url_for)
+from flask import Blueprint, flash, jsonify, redirect, render_template, url_for
 from flask_login import login_required
 
 logger = logging.getLogger(__name__)
 
-bp = Blueprint("network_discovery", __name__,
-               template_folder="templates",
-               root_path=_os.path.dirname(_os.path.abspath(__file__)),
-               url_prefix="/network/discovery")
+bp = Blueprint(
+    "network_discovery",
+    __name__,
+    template_folder="templates",
+    root_path=_os.path.dirname(_os.path.abspath(__file__)),
+    url_prefix="/network/discovery",
+)
 
 _scan_lock = threading.Lock()
 
@@ -70,23 +72,28 @@ _NEIGH_DEAD = {"FAILED", "INCOMPLETE", "NONE"}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _get_db():
     from jen.models.db import get_jen_db
+
     return get_jen_db()
 
 
 def _get_kea_db():
     from jen.models.db import get_kea_db
+
     return get_kea_db()
 
 
 def _subnet_map():
     from jen import extensions
+
     return extensions.SUBNET_MAP
 
 
 def _accessible_subnets():
     from jen.services.access import get_accessible_subnet_map
+
     return get_accessible_subnet_map()
 
 
@@ -97,13 +104,18 @@ def _nmap_available():
 def _ip_binary():
     """`ip` lives in /usr/sbin, which a service user's PATH may not have."""
     for candidate in ("ip", "/usr/sbin/ip", "/sbin/ip", "/bin/ip"):
-        found = shutil.which(candidate) if "/" not in candidate else (candidate if _os.access(candidate, _os.X_OK) else None)
+        found = (
+            shutil.which(candidate)
+            if "/" not in candidate
+            else (candidate if _os.access(candidate, _os.X_OK) else None)
+        )
         if found:
             return found
     return None
 
 
 # ── Scanning ──────────────────────────────────────────────────────────────────
+
 
 def _parse_nmap_greppable(text):
     """`nmap -sn --oG -` → [{ip, mac, hostname}]. Only up hosts are listed
@@ -195,7 +207,9 @@ def _scan_subnet(cidr):
     try:
         result = subprocess.run(
             ["nmap", "-sn", "-T4", "--host-timeout", "5s", "-PS" + _NMAP_PROBE_PORTS, cidr, "--oG", "-"],
-            capture_output=True, text=True, timeout=_NMAP_TIMEOUT,
+            capture_output=True,
+            text=True,
+            timeout=_NMAP_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
         return {"error": f"Scan timed out after {_NMAP_TIMEOUT}s"}
@@ -257,7 +271,7 @@ def _cross_reference_kea(hosts, subnet_id):
 
 
 def _hex_to_mac(hex_str):
-    return ":".join(hex_str[i:i + 2] for i in range(0, 12, 2)).lower()
+    return ":".join(hex_str[i : i + 2] for i in range(0, 12, 2)).lower()
 
 
 def _previous_rogues(cur, subnet_id, current_job_id):
@@ -316,7 +330,7 @@ def _run_scan_job(subnet_id, cidr):
                 "SELECT id FROM nd_scan_jobs WHERE subnet_id=%s AND id != %s ORDER BY started_at DESC, id DESC",
                 (subnet_id, job_id),
             )
-            old_ids = [r["id"] for r in cur.fetchall()][_KEEP_JOBS - 1:]
+            old_ids = [r["id"] for r in cur.fetchall()][_KEEP_JOBS - 1 :]
             if old_ids:
                 placeholders = ",".join(["%s"] * len(old_ids))
                 cur.execute(f"DELETE FROM nd_scan_results WHERE job_id IN ({placeholders})", old_ids)
@@ -359,6 +373,7 @@ def _alert_new_rogues(subnet_id, new_rogues, rogue_count):
     it like any other per-subnet alert."""
     try:
         from jen.services.alerts import send_alert
+
         subnet_name = _subnet_map().get(subnet_id, {}).get("name", str(subnet_id))
         listed = "\n".join(f"  • {ip}" for ip in new_rogues[:10])
         if len(new_rogues) > 10:
@@ -367,8 +382,10 @@ def _alert_new_rogues(subnet_id, new_rogues, rogue_count):
             alert_type="rogue_device",
             subnet_id=subnet_id,
             subject=f"⚠️ {len(new_rogues)} new unknown device(s) on {subnet_name}",
-            body=(f"Network Discovery found {len(new_rogues)} device(s) on {subnet_name} not in Kea that the "
-                  f"previous scan hadn't seen ({rogue_count} unknown in total):\n{listed}"),
+            body=(
+                f"Network Discovery found {len(new_rogues)} device(s) on {subnet_name} not in Kea that the "
+                f"previous scan hadn't seen ({rogue_count} unknown in total):\n{listed}"
+            ),
         )
     except Exception as e:
         logger.warning(f"Network Discovery: could not send alert: {e}")
@@ -386,6 +403,7 @@ def _expire_stale_running_jobs(cur):
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
 
 @bp.route("/")
 @login_required
@@ -427,6 +445,7 @@ def index():
 @login_required
 def start_scan(subnet_id):
     from jen.services.access import assert_subnet_access
+
     if not assert_subnet_access(subnet_id):
         return redirect(url_for("network_discovery.index"))
 
@@ -478,6 +497,7 @@ def start_scan(subnet_id):
 @login_required
 def results(subnet_id):
     from jen.services.access import assert_subnet_access
+
     if not assert_subnet_access(subnet_id):
         return redirect(url_for("network_discovery.index"))
 
@@ -533,6 +553,7 @@ def results(subnet_id):
 def api_scan_status(subnet_id):
     """Poll endpoint for scan progress."""
     from jen.services.access import assert_subnet_access
+
     if not assert_subnet_access(subnet_id):
         return jsonify({"error": "Access denied"}), 403
     db = None
@@ -549,12 +570,14 @@ def api_scan_status(subnet_id):
             )
             row = cur.fetchone()
         if row:
-            return jsonify({
-                "status": row["status"],
-                "hosts_found": row["hosts_found"],
-                "rogue_count": row["rogue_count"],
-                "finished_at": row["finished_at"].isoformat() if row["finished_at"] else None,
-            })
+            return jsonify(
+                {
+                    "status": row["status"],
+                    "hosts_found": row["hosts_found"],
+                    "rogue_count": row["rogue_count"],
+                    "finished_at": row["finished_at"].isoformat() if row["finished_at"] else None,
+                }
+            )
         return jsonify({"status": "never"})
     except Exception as e:
         logger.error(f"Network Discovery scan-status error: {e}")

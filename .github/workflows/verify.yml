@@ -19,11 +19,17 @@ jobs:
         with:
           python-version: "3.10"
 
+      # ruff is pinned to the exact version jen-kea's CI pins: the bundled
+      # copy of this plugin is linted and format-checked there with the
+      # same ruff.toml, and `ruff format` output shifts between releases.
       - name: Install lint/template tooling
-        run: pip install ruff jinja2
+        run: pip install ruff==0.16.6 jinja2
 
-      - name: Ruff (pinned rule set in ruff.toml)
+      - name: ruff check
         run: ruff check plugin.py tools/verify.py
+
+      - name: ruff format --check
+        run: ruff format --check plugin.py tools/verify.py
 
       - name: Verify manifest, changelog, templates (CSP), and plugin.zip
         run: python tools/verify.py
