@@ -2,6 +2,8 @@
 
 Scan your subnets for devices not in the Kea DHCP lease table. Finds every live host on a subnet, records its MAC where the network allows it, flags devices Kea doesn't know about, and fires a Jen alert when an unknown device appears that the previous scan hadn't seen.
 
+> **IPv4 only.** As of Jen v5.0's IPv6 rollout, active scanning here only covers IPv4 subnets — there's no IPv6 equivalent of an address-space sweep at homelab scale. IPv6 devices are visible on Jen's own Devices page (read from Kea's lease table directly, not scanned) instead. This isn't a bug or a gap to report — it's a deliberate v5.0 scope decision.
+
 ## Requirements
 
 - [Jen](https://github.com/ltkojak/jen-kea) v3.6.0 or later

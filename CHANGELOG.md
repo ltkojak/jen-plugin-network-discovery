@@ -1,5 +1,14 @@
 # Network Discovery Plugin — Changelog
 
+## [1.0.6] - 2026-09-13
+
+### Housekeeping: the IPv4-only README note, back from the bundled copy
+
+Jen v5.0's IPv6 rollout added an "IPv4 only" scope note to this
+plugin's README — but only in the copy bundled inside `jen-kea`; the
+v1.0.3 README rewrite here didn't carry it, and Jen's own test suite
+checks for it. Restored. No functional change.
+
 ## [1.0.5] - 2026-09-13
 
 ### Housekeeping: same lint rules as Jen
