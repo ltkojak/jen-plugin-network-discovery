@@ -1,5 +1,86 @@
 # Network Discovery Plugin — Changelog
 
+## [1.1.0] - 2026-09-13
+
+### Every host gets a name for what it is — "rogue" meant "not in Kea"
+
+Until now a found host was either "in Kea" (an active lease or a
+reservation *for this subnet*) or "rogue". That flagged the gateway,
+the DNS servers, the Kea server itself, the Jen host, every device
+with a global reservation, every static host recorded in IPAM Lite,
+and every device Jen had ever seen but which had no lease at that
+moment. The maintainer's first scan reported the gateway as rogue.
+
+Each host now gets one status, first match wins:
+
+| status | means |
+|---|---|
+| `lease` | an active Kea lease, by IP or by MAC |
+| `reservation` | a Kea host reservation — this subnet's **or a global one** (v1.0.x matched only `dhcp4_subnet_id = this subnet`) |
+| `infrastructure` | the gateway, a DNS server, the Kea server, the Jen host, network/broadcast — from Jen's subnet context |
+| `ipam` | an IPAM Lite static/planned entry for the IP or MAC, when that plugin is installed |
+| `device` | a device Jen has seen before (the devices table, by MAC) with no lease right now — a static host |
+| `known` | marked "I know this one" on the results page |
+| `unknown` | nothing above — the only status that alerts |
+
+Vendor and device type come from Jen's OUI table (and the devices
+table where Jen already classified the MAC). The results page filters
+by status, shows a label (the IPAM label, the device name, "Gateway"),
+and offers per-host actions: **👍 Known** (with a note; never alerts
+again — **Forget** reverses it), **📌** create a Kea reservation with
+IP/MAC/hostname prefilled, **📋** add an IPAM Lite entry for the
+address (when IPAM Lite v1.5.0+ is installed). The old `in_kea` /
+`rogue` columns are kept and derived (rogue = unknown).
+
+**Requires Jen 5.30.0** for the subnet context, the periodic-job hook
+and the shared CSV guard.
+
+### Install nmap from Jen
+
+The manifest declares `os_packages: ["nmap"]`. On a systemd host the
+"nmap not found" notice — here and on Settings → Plugins — is now an
+**Install nmap** button that goes through Jen's root-run plugin
+service (the same request/execute split as plugin installs; the root
+side only ever installs packages on its own allowlist). Elsewhere the
+`apt install` command stays.
+
+### Alerts key on the MAC
+
+"New unknowns" were compared by IP, so a DHCP client that hopped
+addresses re-alerted on every scan. The comparison is by MAC when the
+scan captured one (IP otherwise), and the alert lists hostname, vendor
+and MAC per host instead of bare IPs.
+
+### Scheduled scans
+
+Per subnet, superadmin: scan every 6 / 12 / 24 hours or weekly (off by
+default), through Jen's periodic-job hook — no thread of the plugin's
+own. A scheduled run is a normal job: same results, same pruning, same
+alert rule.
+
+### Scope, time, and what went wrong
+
+- A subnet larger than a /20 is refused with a reason instead of
+  timing out; the nmap timeout scales with the subnet (a /24 gets
+  ~90 s, a /20 the cap).
+- A failed scan records *why* (`nd_scan_jobs.error`) and the page shows
+  it — "nmap did not finish within 92s", "interrupted (Jen restarted
+  mid-scan)" — instead of a bare ✗.
+- The results page shows what changed since the previous scan
+  (+appeared / −gone, keyed by MAC), and exports the scan as CSV (every
+  cell formula-guarded).
+
+### Housekeeping
+
+- Migrations 3–9 (plain portable DDL): `status`, `label`, `vendor`,
+  `device_type` on results; `error` on jobs; `nd_known_hosts`;
+  `nd_settings`.
+- `tools/test_plugin.py`: pure-function checks (classification
+  precedence, MAC-keyed deltas, parsers, scope/timeout, scheduling) run
+  in CI after `verify.py`.
+- A running job is considered abandoned after 30 minutes (was 10 — a
+  /20 legitimately takes longer now).
+
 ## [1.0.7] - 2026-09-13
 
 ### Housekeeping: no dynamically-built SQL in the prune

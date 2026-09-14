@@ -7,8 +7,9 @@
         <h1>🔍 {{ subnet.name }} — Discovery Results</h1>
         <p>{{ subnet.cidr }}{% if job %} · Scanned {{ job.finished_at | utcfmt if job.finished_at else 'in progress' }}{% endif %}</p>
     </div>
-    <div style="display:flex;gap:8px;">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <a href="{{ url_for('network_discovery.index') }}" class="btn btn-secondary">← Back</a>
+        {% if job %}<a href="{{ url_for('network_discovery.export_results', subnet_id=subnet_id) }}" class="btn btn-secondary">⬇ CSV</a>{% endif %}
         <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-primary">🔄 Re-scan</button>
@@ -22,62 +23,92 @@
 </div>
 {% else %}
 
+{% if job.status == 'error' %}
+<div class="alert alert-danger">✗ The last scan failed: {{ job.error or 'see the Jen log' }}</div>
+{% endif %}
+
 <!-- Summary bar -->
 <div class="card">
-    <div style="display:flex;gap:32px;flex-wrap:wrap;">
+    <div style="display:flex;gap:28px;flex-wrap:wrap;">
         <div>
-            <div style="font-size:28px;font-weight:700;color:var(--primary);">{{ job.hosts_found }}</div>
-            <div style="font-size:12px;color:var(--text-muted);">Total hosts found</div>
+            <div style="font-size:28px;font-weight:700;color:var(--primary);">{{ hosts|length }}</div>
+            <div style="font-size:12px;color:var(--text-muted);">Hosts found</div>
         </div>
+        {% for s in statuses %}
+        {% if counts[s] %}
         <div>
-            <div style="font-size:28px;font-weight:700;color:var(--success);">{{ hosts | selectattr('in_kea') | list | length }}</div>
-            <div style="font-size:12px;color:var(--text-muted);">In Kea (known)</div>
+            <div style="font-size:28px;font-weight:700;{% if s == 'unknown' %}color:var(--warning){% elif s in ('lease','reservation') %}color:var(--success){% else %}color:var(--text-muted){% endif %};">{{ counts[s] }}</div>
+            <div style="font-size:12px;color:var(--text-muted);">{{ status_labels[s] }}</div>
         </div>
-        <div>
-            <div style="font-size:28px;font-weight:700;{% if job.rogue_count > 0 %}color:var(--warning){% else %}color:var(--success){% endif %};">{{ job.rogue_count }}</div>
-            <div style="font-size:12px;color:var(--text-muted);">Rogue (not in Kea)</div>
-        </div>
-        <div>
-            <div style="font-size:13px;color:var(--text-muted);">Status</div>
-            <div style="font-size:13px;{% if job.status == 'done' %}color:var(--success){% else %}color:var(--warning){% endif %};">{{ job.status | title }}</div>
-        </div>
+        {% endif %}
+        {% endfor %}
     </div>
+    {% if appeared or gone %}
+    <div style="margin-top:12px;font-size:12px;color:var(--text-muted);">
+        Since the previous scan:
+        {% if appeared %}<span style="color:var(--success);">+{{ appeared|length }} appeared</span> ({{ appeared|map(attribute='ip')|join(', ') }}){% endif %}
+        {% if appeared and gone %} · {% endif %}
+        {% if gone %}<span style="color:var(--danger);">−{{ gone|length }} gone</span> ({{ gone|map(attribute='ip')|join(', ') }}){% endif %}
+    </div>
+    {% endif %}
 </div>
 
 <!-- Results table -->
 {% if hosts %}
 <div class="card" style="padding:0;">
-    <div class="card-header" style="padding:16px 20px 12px;">
+    <div class="card-header" style="padding:16px 20px 12px;flex-wrap:wrap;gap:8px;">
         <span class="card-title">Discovered Hosts</span>
-        <div style="display:flex;gap:8px;">
-            <button class="btn btn-sm btn-secondary" data-filter-mode="all">All ({{ hosts|length }})</button>
-            <button class="btn btn-sm btn-secondary" data-filter-mode="rogue">⚠ Rogue ({{ job.rogue_count }})</button>
-            <button class="btn btn-sm btn-secondary" data-filter-mode="known">✓ Known ({{ hosts | selectattr('in_kea') | list | length }})</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;" id="nd-filters">
+            <button class="btn btn-sm btn-primary" data-filter-mode="all">All ({{ hosts|length }})</button>
+            {% for s in statuses %}{% if counts[s] %}
+            <button class="btn btn-sm btn-secondary" data-filter-mode="{{ s }}">{{ status_labels[s] }} ({{ counts[s] }})</button>
+            {% endif %}{% endfor %}
         </div>
     </div>
     <div class="table-wrap">
     <table id="results-table">
         <thead><tr>
             <th>IP Address</th>
-            <th>Hostname</th>
+            <th>Hostname / Label</th>
+            <th>Vendor</th>
             <th>MAC</th>
             <th>Status</th>
             <th>Discovered</th>
+            <th></th>
         </tr></thead>
         <tbody>
         {% for h in hosts %}
-        <tr data-rogue="{{ 'true' if h.rogue else 'false' }}">
+        <tr data-status="{{ h.status }}">
             <td class="mono" style="color:var(--primary);">{{ h.ip }}</td>
-            <td style="font-size:13px;">{{ h.hostname or '—' }}</td>
+            <td style="font-size:13px;">{{ h.hostname or h.label or '—' }}{% if h.hostname and h.label %} <span style="color:var(--text-muted);font-size:11px;">({{ h.label }})</span>{% endif %}</td>
+            <td style="font-size:12px;color:var(--text-muted);">{{ h.vendor or '—' }}</td>
             <td class="mono" style="font-size:12px;">{{ h.mac or '—' }}</td>
-            <td>
-                {% if h.rogue %}
-                <span style="color:var(--warning);font-size:12px;">⚠ Rogue</span>
-                {% else %}
-                <span style="color:var(--success);font-size:12px;">✓ In Kea</span>
-                {% endif %}
-            </td>
+            <td style="font-size:12px;{% if h.status == 'unknown' %}color:var(--warning){% elif h.status in ('lease','reservation') %}color:var(--success){% else %}color:var(--text-muted){% endif %};">{{ status_labels.get(h.status, h.status) }}</td>
             <td style="font-size:12px;color:var(--text-muted);">{{ h.discovered_at | utcfmt if h.discovered_at else '—' }}</td>
+            <td style="white-space:nowrap;">
+                <div style="display:flex;gap:4px;">
+                {% if h.status == 'unknown' %}
+                <form method="POST" action="{{ url_for('network_discovery.mark_known', subnet_id=subnet_id) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="ip" value="{{ h.ip }}"><input type="hidden" name="mac" value="{{ h.mac }}">
+                    <input type="text" name="note" maxlength="200" placeholder="note" style="width:110px;font-size:11px;padding:3px 6px;">
+                    <button type="submit" class="btn btn-sm btn-secondary" title="Never alert on this again">👍 Known</button>
+                </form>
+                {% elif h.status == 'known' %}
+                <form method="POST" action="{{ url_for('network_discovery.mark_known', subnet_id=subnet_id) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="ip" value="{{ h.ip }}"><input type="hidden" name="mac" value="{{ h.mac }}"><input type="hidden" name="action" value="forget">
+                    <button type="submit" class="btn btn-sm btn-secondary" title="Count it as unknown again">Forget</button>
+                </form>
+                {% endif %}
+                {% if h.status in ('unknown', 'known', 'device', 'ipam') %}
+                <a href="/reservations/add?ip={{ h.ip }}&subnet={{ subnet_id }}{% if h.mac %}&mac={{ h.mac }}{% endif %}{% if h.hostname %}&hostname={{ h.hostname|urlencode }}{% endif %}" class="btn btn-sm btn-secondary" title="Create a Kea reservation">📌</a>
+                {% if ipam_installed %}
+                <a href="/network/ipam/subnet/kea/{{ subnet_id }}?ip={{ h.ip }}" class="btn btn-sm btn-secondary" title="Add an IPAM Lite entry">📋</a>
+                {% endif %}
+                {% endif %}
+                </div>
+            </td>
         </tr>
         {% endfor %}
         </tbody>
@@ -87,13 +118,15 @@
 <script nonce="{{ csp_nonce }}">
 function filterTable(mode) {
     document.querySelectorAll('#results-table tbody tr').forEach(function(row) {
-        var rogue = row.getAttribute('data-rogue') === 'true';
-        if (mode === 'all') row.style.display = '';
-        else if (mode === 'rogue') row.style.display = rogue ? '' : 'none';
-        else if (mode === 'known') row.style.display = !rogue ? '' : 'none';
+        row.style.display = (mode === 'all' || row.getAttribute('data-status') === mode) ? '' : 'none';
+    });
+    document.querySelectorAll('#nd-filters [data-filter-mode]').forEach(function(b) {
+        var on = b.getAttribute('data-filter-mode') === mode;
+        b.classList.toggle('btn-primary', on);
+        b.classList.toggle('btn-secondary', !on);
     });
 }
-document.addEventListener('click', function(e) {
+document.getElementById('nd-filters').addEventListener('click', function(e) {
     var btn = e.target.closest('[data-filter-mode]');
     if (btn) filterTable(btn.getAttribute('data-filter-mode'));
 });

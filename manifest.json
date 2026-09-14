@@ -1,22 +1,36 @@
 {
-  "id":           "network-discovery",
-  "name":         "Network Discovery",
-  "version":      "1.0.7",
-  "description":  "Scan your subnets for devices not in the Kea lease table. Finds every live host on an attached subnet (with MAC), flags devices Kea doesn't know, and alerts on new unknowns. Requires nmap on the Jen host.",
-  "author":       "Matthew Thibodeau",
-  "requires_jen": "3.6.0",
-  "tags":         ["network", "security", "scanning"],
+  "id": "network-discovery",
+  "name": "Network Discovery",
+  "version": "1.1.0",
+  "description": "Scan your subnets and account for every device on them: Kea lease or reservation, the subnet's own gateway/DNS/Kea/Jen addresses, an IPAM Lite entry, a device Jen has seen, or one you marked known — only what's left is unknown, and only a new unknown alerts. Vendor from the MAC, scheduled scans, since-last-scan changes, one-click reservation or IPAM entry, CSV export. Needs nmap on the Jen host (Settings → Plugins can install it).",
+  "author": "Matthew Thibodeau",
+  "requires_jen": "5.30.0",
+  "tags": [
+    "network",
+    "security",
+    "scanning"
+  ],
   "changelog_url": "https://github.com/ltkojak/jen-plugin-network-discovery/blob/main/CHANGELOG.md",
   "nav": [
     {
-      "section":  "network",
-      "label":    "Discovery",
-      "icon":     "🔍",
+      "section": "network",
+      "label": "Discovery",
+      "icon": "🔍",
       "endpoint": "network_discovery.index"
     }
   ],
+  "os_packages": [
+    "nmap"
+  ],
   "db_migrations": [
     {"version": 1, "description": "nd_scan_jobs table", "sql": "CREATE TABLE IF NOT EXISTS nd_scan_jobs (id INT AUTO_INCREMENT PRIMARY KEY, subnet_id INT NOT NULL, started_at DATETIME DEFAULT CURRENT_TIMESTAMP, finished_at DATETIME DEFAULT NULL, status VARCHAR(20) DEFAULT 'running', hosts_found INT DEFAULT 0, rogue_count INT DEFAULT 0)"},
-    {"version": 2, "description": "nd_scan_results table", "sql": "CREATE TABLE IF NOT EXISTS nd_scan_results (id INT AUTO_INCREMENT PRIMARY KEY, job_id INT NOT NULL, ip VARCHAR(15) NOT NULL, mac VARCHAR(17), hostname VARCHAR(255), in_kea TINYINT(1) DEFAULT 0, rogue TINYINT(1) DEFAULT 0, discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP)"}
+    {"version": 2, "description": "nd_scan_results table", "sql": "CREATE TABLE IF NOT EXISTS nd_scan_results (id INT AUTO_INCREMENT PRIMARY KEY, job_id INT NOT NULL, ip VARCHAR(15) NOT NULL, mac VARCHAR(17), hostname VARCHAR(255), in_kea TINYINT(1) DEFAULT 0, rogue TINYINT(1) DEFAULT 0, discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP)"},
+    {"version": 3, "description": "results: status (lease/reservation/infrastructure/ipam/device/known/unknown), v1.1.0", "sql": "ALTER TABLE nd_scan_results ADD COLUMN status VARCHAR(20) NULL AFTER rogue"},
+    {"version": 4, "description": "results: label (what the host is, when known)", "sql": "ALTER TABLE nd_scan_results ADD COLUMN label VARCHAR(200) NULL AFTER status"},
+    {"version": 5, "description": "results: vendor from the OUI table", "sql": "ALTER TABLE nd_scan_results ADD COLUMN vendor VARCHAR(100) NULL AFTER label"},
+    {"version": 6, "description": "results: device_type from the OUI table / devices", "sql": "ALTER TABLE nd_scan_results ADD COLUMN device_type VARCHAR(30) NULL AFTER vendor"},
+    {"version": 7, "description": "jobs: the reason a scan failed", "sql": "ALTER TABLE nd_scan_jobs ADD COLUMN error VARCHAR(255) NULL AFTER rogue_count"},
+    {"version": 8, "description": "known hosts (the operator's I-know-this-one list)", "sql": "CREATE TABLE IF NOT EXISTS nd_known_hosts (id INT AUTO_INCREMENT PRIMARY KEY, mac VARCHAR(17) NOT NULL DEFAULT '', ip VARCHAR(15) NOT NULL DEFAULT '', note VARCHAR(200), added_by VARCHAR(100), added_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY uniq_known (mac, ip))"},
+    {"version": 9, "description": "per-subnet scan schedule (hours; 0 = off)", "sql": "CREATE TABLE IF NOT EXISTS nd_settings (subnet_id INT PRIMARY KEY, every_hours INT NOT NULL DEFAULT 0, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)"}
   ]
 }

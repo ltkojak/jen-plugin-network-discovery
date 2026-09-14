@@ -26,10 +26,13 @@ jobs:
         run: pip install ruff==0.16.6 jinja2
 
       - name: ruff check
-        run: ruff check plugin.py tools/verify.py
+        run: ruff check plugin.py tools/verify.py tools/test_plugin.py
 
       - name: ruff format --check
-        run: ruff format --check plugin.py tools/verify.py
+        run: ruff format --check plugin.py tools/verify.py tools/test_plugin.py
 
       - name: Verify manifest, changelog, templates (CSP), and plugin.zip
         run: python tools/verify.py
+
+      - name: Plugin unit checks (pure functions, no Jen or database needed)
+        run: python tools/test_plugin.py
