@@ -127,25 +127,25 @@ _SCHEDULE_CHOICES = (0, 6, 12, 24, 168)
 
 
 def _get_db():
-    from jen.models.db import get_jen_db
+    from jen.plugin_api import get_jen_db
 
     return get_jen_db()
 
 
 def _get_kea_db():
-    from jen.models.db import get_kea_db
+    from jen.plugin_api import get_kea_db
 
     return get_kea_db()
 
 
 def _subnet_map():
-    from jen import extensions
+    from jen.plugin_api import subnet_map
 
-    return extensions.SUBNET_MAP
+    return subnet_map()
 
 
 def _accessible_subnets():
-    from jen.services.access import get_accessible_subnet_map
+    from jen.plugin_api import get_accessible_subnet_map
 
     return get_accessible_subnet_map()
 
@@ -162,7 +162,7 @@ def _can_install_nmap():
     """Jen 5.30.0's plugin os_packages path exists and this is a systemd
     host (the root-run plugin service can apt-install nmap)."""
     try:
-        from jen.services.plugins import is_systemd_host
+        from jen.plugin_api import is_systemd_host
 
         return bool(is_systemd_host())
     except Exception:
@@ -184,7 +184,7 @@ def _ip_binary():
 
 def _safe_row(values):
     try:
-        from jen.services.csv_safe import safe_row
+        from jen.plugin_api import safe_row
 
         return safe_row(values)
     except Exception:
@@ -338,7 +338,7 @@ def _subnet_ctx(subnet_id, cidr):
     """Jen's subnet_context (5.30.0) — gateway, DNS, Kea/Jen hosts — else
     just network/broadcast."""
     try:
-        from jen.services.subnet_context import subnet_context
+        from jen.plugin_api import subnet_context
 
         ctx = subnet_context(subnet_id)
         if ctx:
@@ -478,7 +478,7 @@ def _vendor(mac, hostname):
     if not mac:
         return "", "", ""
     try:
-        from jen.services.fingerprint import classify_device
+        from jen.plugin_api import classify_device
 
         manufacturer, device_type, icon = classify_device(mac, hostname or "")
         return (
@@ -680,7 +680,7 @@ def _alert_new_unknowns(subnet_id, fresh, unknown_count, trigger):
     Settings → Alerts). subnet_id lets a subnet-scoped channel filter
     it like any other per-subnet alert."""
     try:
-        from jen.services.alerts import send_alert
+        from jen.plugin_api import send_alert
 
         subnet_name = _subnet_map().get(subnet_id, {}).get("name", str(subnet_id))
         lines = []
@@ -852,7 +852,7 @@ def index():
 @bp.route("/scan/<int:subnet_id>", methods=["POST"])
 @login_required
 def start_scan(subnet_id):
-    from jen.services.access import assert_subnet_access
+    from jen.plugin_api import assert_subnet_access
 
     if not assert_subnet_access(subnet_id):
         return redirect(url_for("network_discovery.index"))
@@ -935,9 +935,9 @@ def set_schedule(subnet_id):
         name = subnet_map[subnet_id]["name"]
         flash(f"{name}: scheduled scans {'off' if not hours else f'every {hours} h'}.", "success")
         try:
-            from jen.models import user as _user
+            from jen.plugin_api import audit
 
-            _user.audit("ND_SCHEDULE", name, f"subnet={subnet_id} every_hours={hours}")
+            audit("ND_SCHEDULE", name, f"subnet={subnet_id} every_hours={hours}")
         except Exception:
             pass
     except Exception as e:
@@ -970,7 +970,7 @@ def _load_results(cur, job_id):
 @bp.route("/results/<int:subnet_id>")
 @login_required
 def results(subnet_id):
-    from jen.services.access import assert_subnet_access
+    from jen.plugin_api import assert_subnet_access
 
     if not assert_subnet_access(subnet_id):
         return redirect(url_for("network_discovery.index"))
@@ -1028,9 +1028,9 @@ def results(subnet_id):
 
 def _ipam_installed():
     try:
-        from jen.services.plugins import discover_plugins
+        from jen.plugin_api import installed_plugins
 
-        return any(p.get("id") == "ipam" and p.get("enabled") for p in discover_plugins())
+        return any(p.get("id") == "ipam" and p.get("enabled") for p in installed_plugins())
     except Exception:
         return False
 
@@ -1038,7 +1038,7 @@ def _ipam_installed():
 @bp.route("/results/<int:subnet_id>/export")
 @login_required
 def export_results(subnet_id):
-    from jen.services.access import assert_subnet_access
+    from jen.plugin_api import assert_subnet_access
 
     if not assert_subnet_access(subnet_id):
         return redirect(url_for("network_discovery.index"))
@@ -1091,7 +1091,7 @@ def mark_known(subnet_id):
     """v1.1.0 — "I know this one": never alert on this MAC (or IP, when
     there's no MAC) again; shows as `known` on every future scan.
     `action=forget` removes it."""
-    from jen.services.access import assert_subnet_access
+    from jen.plugin_api import assert_subnet_access
 
     if not assert_subnet_access(subnet_id):
         return redirect(url_for("network_discovery.index"))
@@ -1155,9 +1155,9 @@ def mark_known(subnet_id):
             "success",
         )
         try:
-            from jen.models import user as _user
+            from jen.plugin_api import audit
 
-            _user.audit("ND_KNOWN_HOST", what, f"subnet={subnet_id} action={action} note={note}")
+            audit("ND_KNOWN_HOST", what, f"subnet={subnet_id} action={action} note={note}")
         except Exception:
             pass
     except Exception as e:
@@ -1173,7 +1173,7 @@ def mark_known(subnet_id):
 @login_required
 def api_scan_status(subnet_id):
     """Poll endpoint for scan progress."""
-    from jen.services.access import assert_subnet_access
+    from jen.plugin_api import assert_subnet_access
 
     if not assert_subnet_access(subnet_id):
         return jsonify({"error": "Access denied"}), 403
@@ -1214,7 +1214,7 @@ def register(app):
     # v1.1.0 — scheduled scans through Jen's periodic-job hook (5.30.0).
     # Registration only; nothing starts here (create_app must stay pure).
     try:
-        from jen.services.background import register_periodic
+        from jen.plugin_api import register_periodic
 
         register_periodic(PLUGIN_ID, "scheduled-scans", _scheduled_tick, _SCHEDULE_TICK_MINUTES)
     except Exception as e:

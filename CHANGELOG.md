@@ -1,5 +1,18 @@
 # Network Discovery Plugin — Changelog
 
+## [1.1.1] - 2026-09-15
+
+### Imports only `jen.plugin_api`
+
+Jen 5.34.0 introduces one import surface for plugins, `jen.plugin_api`
+— a versioned re-export of what plugins have needed so far, so a rename
+inside Jen can never silently break a plugin again. Network Discovery
+now imports from it and nowhere else inside `jen` (`installed_plugins()`
+replaces the internal `discover_plugins`, `subnet_map()` replaces
+`extensions.SUBNET_MAP`), and its manifest declares `"plugin_api": 1`.
+No functional change. **Requires Jen 5.34.0 or later** (a 5.34.0 beta
+counts).
+
 ## [1.1.0] - 2026-09-13
 
 ### Every host gets a name for what it is — "rogue" meant "not in Kea"

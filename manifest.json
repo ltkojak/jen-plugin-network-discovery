@@ -1,10 +1,11 @@
 {
   "id": "network-discovery",
   "name": "Network Discovery",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Scan your subnets and account for every device on them: Kea lease or reservation, the subnet's own gateway/DNS/Kea/Jen addresses, an IPAM Lite entry, a device Jen has seen, or one you marked known — only what's left is unknown, and only a new unknown alerts. Vendor from the MAC, scheduled scans, since-last-scan changes, one-click reservation or IPAM entry, CSV export. Needs nmap on the Jen host (Settings → Plugins can install it).",
   "author": "Matthew Thibodeau",
-  "requires_jen": "5.30.0",
+  "requires_jen": "5.34.0",
+  "plugin_api": 1,
   "tags": [
     "network",
     "security",
