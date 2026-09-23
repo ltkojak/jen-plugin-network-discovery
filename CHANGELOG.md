@@ -1,5 +1,31 @@
 # Network Discovery Plugin — Changelog
 
+## [1.1.2] - 2026-09-23
+
+### Viewers were never actually read-only, and two clicks could queue the same subnet twice
+
+Jen's viewer tier is read-only everywhere else, but Network Discovery's
+`start_scan` and `mark_known` routes checked only subnet access, never
+the role. A read-only viewer could launch an nmap sweep from the Jen
+host, and — since the known-hosts list has no subnet column by design
+(a MAC is a MAC, wherever it's seen) — could add or forget an entry
+and silence or un-silence the `rogue_device` alert for a MAC on any
+subnet, not just their own. Both routes now refuse a viewer up front,
+before either one even looks at the subnet or the submitted form, with
+a plain "Viewers can look at Discovery but not scan or mark hosts."
+Known hosts stay global by design; the README says so.
+
+Separately, a scan's `nd_scan_jobs` row only appeared once the scan
+thread actually acquired the shared scan lock and started running —
+not when it was requested. Two clicks on different subnets while one
+scan held the lock could queue two duplicate scans of the second
+subnet, since neither saw the other's job row yet. A scan is now
+recorded as `queued` the moment it's requested (by a click or the
+scheduler), before the lock is even reached, and moves to `running`
+once it actually starts; the duplicate check and the scheduler both
+treat a queued scan the same as a running one, and the index card
+shows "Queued" while it waits its turn.
+
 ## [1.1.1] - 2026-09-15
 
 ### Imports only `jen.plugin_api`

@@ -154,6 +154,32 @@ def _is_superadmin():
     return getattr(current_user, "role", "") == "superadmin"
 
 
+def _is_admin():
+    try:
+        from jen.plugin_api import is_admin_or_above
+
+        return is_admin_or_above()
+    except Exception:
+        # Fall back to a direct role check if the import shape ever changes.
+        role = getattr(current_user, "role", None)
+        if role is not None:
+            return role in ("superadmin", "admin")
+        return bool(getattr(current_user, "is_admin", False))
+
+
+def _require_write():
+    """v1.1.2 — start_scan and mark_known used to gate only on
+    assert_subnet_access, never the role: a read-only viewer could launch
+    an nmap sweep from the Jen host, or add/forget a nd_known_hosts row and
+    silence (or un-silence) a rogue_device alert for a MAC seen anywhere.
+    Every write route calls this FIRST, before assert_subnet_access and
+    before touching request.form."""
+    if _is_admin():
+        return True
+    flash("Viewers can look at Discovery but not scan or mark hosts.", "error")
+    return False
+
+
 def _nmap_available():
     return shutil.which("nmap") is not None
 
@@ -601,14 +627,35 @@ def _mark_job(db, job_id, status, error=None, hosts=0, unknown=0):
     db.commit()
 
 
-def _run_scan_job(subnet_id, cidr, trigger="manual"):
-    """Run a full scan job, store results in DB. Returns job_id."""
+def _queue_scan_job(subnet_id):
+    """v1.1.2 — INSERT the job row as 'queued' before the scan thread is
+    even spawned, let alone before it acquires _scan_lock. Previously the
+    row only appeared once _run_scan_job() itself ran (inside the lock),
+    so a second click on a DIFFERENT subnet while one scan held the lock
+    saw no row for it yet and queued a duplicate thread; both would run
+    back to back once the lock freed up. Now every caller — the route and
+    the scheduler — reserves the row first, and the duplicate check
+    (queued+running) sees it immediately."""
     db = _get_db()
-    job_id = None
     try:
         with db.cursor() as cur:
-            cur.execute("INSERT INTO nd_scan_jobs (subnet_id, status) VALUES (%s, 'running')", (subnet_id,))
+            cur.execute("INSERT INTO nd_scan_jobs (subnet_id, status) VALUES (%s, 'queued')", (subnet_id,))
             job_id = cur.lastrowid
+        db.commit()
+        return job_id
+    finally:
+        db.close()
+
+
+def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
+    """Run a job already queued as job_id (see _queue_scan_job) once the
+    caller holds _scan_lock. Marks it 'running' — resetting started_at so
+    the stale-job expiry clock starts at the actual run, not the queue
+    time — then stores results in DB. Returns job_id."""
+    db = _get_db()
+    try:
+        with db.cursor() as cur:
+            cur.execute("UPDATE nd_scan_jobs SET status='running', started_at=NOW() WHERE id=%s", (job_id,))
         db.commit()
 
         result = _scan_subnet(cidr)
@@ -714,18 +761,23 @@ def _alert_new_unknowns(subnet_id, fresh, unknown_count, trigger):
 def _expire_stale_running_jobs(cur):
     """A 'running' job older than _STALE_RUNNING_MINUTES is a leftover
     from a Jen restart mid-scan — its thread is gone. Without this the
-    index shows it as 'Scanning…' forever and the poller never stops."""
+    index shows it as 'Scanning…' forever and the poller never stops.
+    v1.1.2 — covers 'queued' rows too: a job Jen queued but never got to
+    start (Jen restarted before it reached the front of _scan_lock) would
+    otherwise show "Queued" forever the same way."""
     cur.execute(
         "UPDATE nd_scan_jobs SET status='error', error='interrupted (Jen restarted mid-scan)', finished_at=NOW() "
-        "WHERE status='running' AND started_at < NOW() - INTERVAL %s MINUTE",
+        "WHERE status IN ('running', 'queued') AND started_at < NOW() - INTERVAL %s MINUTE",
         (_STALE_RUNNING_MINUTES,),
     )
 
 
 def _start_scan(subnet_id, cidr, trigger="manual"):
+    job_id = _queue_scan_job(subnet_id)
+
     def _bg():
         with _scan_lock:
-            _run_scan_job(subnet_id, cidr, trigger)
+            _run_scan_job(subnet_id, cidr, job_id, trigger)
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -783,7 +835,9 @@ def _scheduled_tick():
                     (sid,),
                 )
                 row = cur.fetchone()
-                if row and row["status"] == "running":
+                # v1.1.2 — a queued-but-not-yet-running job counts the same
+                # as running for scheduling purposes: it's already handled.
+                if row and row["status"] in ("running", "queued"):
                     running.add(sid)
                 elif row and row["status"] == "done" and row.get("finished_at"):
                     last_done[sid] = row["finished_at"].replace(tzinfo=timezone.utc)
@@ -799,8 +853,9 @@ def _scheduled_tick():
         if not info or scan_scope_error(info["cidr"]):
             continue
         logger.info(f"Network Discovery: scheduled scan of {info['name']} ({info['cidr']})")
+        job_id = _queue_scan_job(sid)
         with _scan_lock:
-            _run_scan_job(sid, info["cidr"], trigger="scheduled")
+            _run_scan_job(sid, info["cidr"], job_id, trigger="scheduled")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -852,6 +907,9 @@ def index():
 @bp.route("/scan/<int:subnet_id>", methods=["POST"])
 @login_required
 def start_scan(subnet_id):
+    if not _require_write():
+        return redirect(url_for("network_discovery.index"))
+
     from jen.plugin_api import assert_subnet_access
 
     if not assert_subnet_access(subnet_id):
@@ -875,24 +933,28 @@ def start_scan(subnet_id):
         flash(scope, "error")
         return redirect(url_for("network_discovery.index"))
 
-    # Refuse a second scan of a subnet that's genuinely mid-scan; a job
-    # that only *looks* mid-scan because Jen restarted under it gets
-    # expired first so it can't block the subnet forever.
+    # Refuse a second scan of a subnet that's genuinely mid-scan (or
+    # queued behind another subnet's scan — v1.1.2); a job that only
+    # *looks* mid-scan because Jen restarted under it gets expired first
+    # so it can't block the subnet forever.
     db = None
     try:
         db = _get_db()
         with db.cursor() as cur:
             _expire_stale_running_jobs(cur)
-            cur.execute("SELECT id FROM nd_scan_jobs WHERE subnet_id=%s AND status='running' LIMIT 1", (subnet_id,))
-            running = cur.fetchone()
+            cur.execute(
+                "SELECT id FROM nd_scan_jobs WHERE subnet_id=%s AND status IN ('queued', 'running') LIMIT 1",
+                (subnet_id,),
+            )
+            pending = cur.fetchone()
         db.commit()
     except Exception as e:
         logger.error(f"Network Discovery: could not check for a running scan: {e}")
-        running = None
+        pending = None
     finally:
         if db:
             db.close()
-    if running:
+    if pending:
         flash(f"A scan of {subnet_map[subnet_id]['name']} is already in progress.", "warning")
         return redirect(url_for("network_discovery.index"))
 
@@ -1091,6 +1153,9 @@ def mark_known(subnet_id):
     """v1.1.0 — "I know this one": never alert on this MAC (or IP, when
     there's no MAC) again; shows as `known` on every future scan.
     `action=forget` removes it."""
+    if not _require_write():
+        return redirect(url_for("network_discovery.results", subnet_id=subnet_id))
+
     from jen.plugin_api import assert_subnet_access
 
     if not assert_subnet_access(subnet_id):

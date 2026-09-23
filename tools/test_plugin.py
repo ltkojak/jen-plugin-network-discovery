@@ -214,9 +214,34 @@ def main():
     )
     check(p.due_subnets({5: 12}, {}, set(), now) == [5], "a scheduled subnet that never ran is due")
     check(p.due_subnets({}, {}, set(), now) == [], "no schedules, nothing due")
+    # v1.1.2 — _scheduled_tick() now puts a subnet's id in `running` whether
+    # its latest job row is 'running' OR 'queued'; due_subnets() itself just
+    # treats `running` as an opaque exclusion set, so a queued id excludes
+    # the same way an actually-running one always did.
+    check(p.due_subnets({6: 6}, {}, running={6}, now=now) == [], "a queued id in the running set is excluded from due")
 
     # ── csv guard fallback ───────────────────────────────────────────────────
     check(p._safe_row(["=1+1", "ok", None]) == ["'=1+1", "ok", ""], "CSV formula guard (local fallback)")
+
+    # ── write gate (v1.1.2) — viewers can look at Discovery but not scan or mark hosts ─
+    p.current_user.role = "viewer"
+    check(p._is_admin() is False, "a viewer is not admin")
+    check(p._require_write() is False, "a viewer cannot write")
+    # request is None in this harness; a route that reaches request.form
+    # raises AttributeError, so returning None without raising proves
+    # _require_write() stopped it first.
+    for fn, args in (
+        (p.start_scan, (1,)),
+        (p.mark_known, (1,)),
+    ):
+        try:
+            fn(*args)
+            gated = True
+        except Exception:
+            gated = False
+        check(gated, f"{fn.__name__} refuses a viewer before touching the request")
+    p.current_user.role = "superadmin"
+    check(p._is_admin() is True, "superadmin role restored for the rest of the run")
 
     if failures:
         print(f"\n{len(failures)} check(s) failed")

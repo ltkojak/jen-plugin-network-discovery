@@ -32,7 +32,7 @@ Each found host gets one status, first match wins: `lease` (an active Kea lease,
 - Results page: IP, hostname/label, vendor, MAC, status (filter by any), what changed since the previous scan, CSV export; per host: **Known** (never alert again, with a note), **create reservation** (prefilled), **add IPAM entry**
 - Keeps the last 3 scans per subnet
 - Fires Jen's `rogue_device` alert (opt a channel into it under Settings → Alerts) — only for *unknown* hosts the previous scan hadn't seen, compared by MAC so an IP hop doesn't re-alert; the alert lists hostname, vendor and MAC
-- Respects Jen subnet access control — restricted users only see and scan their assigned subnets
+- Respects Jen subnet access control — restricted users only see and scan their assigned subnets; scanning and marking a host known both need admin — viewers are read-only. Known applies to every subnet Jen scans; marking needs admin
 
 ## Installation
 

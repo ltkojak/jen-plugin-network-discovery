@@ -48,6 +48,8 @@
         </div>
         {% if last.get('status') == 'running' %}
         <span style="font-size:11px;color:var(--primary);" id="status-{{ subnet_id }}">⏳ Scanning…</span>
+        {% elif last.get('status') == 'queued' %}
+        <span style="font-size:11px;color:var(--text-muted);" id="status-{{ subnet_id }}">⏳ Queued</span>
         {% elif last.get('status') == 'done' %}
         <span style="font-size:11px;color:var(--success);">✓ Done</span>
         {% elif last.get('status') == 'error' %}
@@ -78,9 +80,9 @@
     </div>
     {% elif last.get('status') == 'error' %}
     <div style="font-size:12px;color:var(--danger);margin-bottom:12px;">✗ {{ last.get('error') or 'scan failed — see the Jen log' }}</div>
-    {% elif last.get('status') == 'running' %}
+    {% elif last.get('status') in ('running', 'queued') %}
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
-        Scan in progress… <span id="dots-{{ subnet_id }}">.</span>
+        {% if last.get('status') == 'queued' %}Queued — waiting for another scan to finish…{% else %}Scan in progress…{% endif %} <span id="dots-{{ subnet_id }}">.</span>
     </div>
     <script nonce="{{ csp_nonce }}">
     (function() {
@@ -105,7 +107,7 @@
         {% if last.get('status') in ('done', 'error') %}
         <a href="{{ url_for('network_discovery.results', subnet_id=subnet_id) }}" class="btn btn-sm btn-secondary">View Results</a>
         {% endif %}
-        {% if scanner_ok and last.get('status') != 'running' and not scope %}
+        {% if scanner_ok and last.get('status') not in ('running', 'queued') and not scope %}
         <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}" style="display:inline;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-sm btn-primary">{% if last.get('status') %}🔄 Re-scan{% else %}🔍 Scan Now{% endif %}</button>
