@@ -2,23 +2,49 @@
 {% block title %}Discovery Results — {{ subnet.name }}{% endblock %}
 {% block content %}
 
-<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+<div class="page-header nd-1bcfaf">
     <div>
-        <h1>🔍 {{ subnet.name }} — Discovery Results</h1>
+        <h1>{{ icon("search", "ico-lg") }} {{ subnet.name }} — Discovery Results</h1>
         <p>{{ subnet.cidr }}{% if job %} · Scanned {{ job.finished_at | utcfmt if job.finished_at else 'in progress' }}{% endif %}</p>
     </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <div class="nd-3de8f9">
         <a href="{{ url_for('network_discovery.index') }}" class="btn btn-secondary">← Back</a>
-        {% if job %}<a href="{{ url_for('network_discovery.export_results', subnet_id=subnet_id) }}" class="btn btn-secondary">⬇ CSV</a>{% endif %}
+        {% if job %}<a href="{{ url_for('network_discovery.export_results', subnet_id=subnet_id) }}" class="btn btn-secondary">{{ icon("download") }} CSV</a>{% endif %}
         <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-primary">🔄 Re-scan</button>
+            <button type="submit" class="btn btn-primary">{{ icon("refresh-cw") }} Re-scan</button>
         </form>
     </div>
 </div>
 
+<style>
+/* v1.2.0 — static declarations moved off individual elements; see
+   jen-plugin-ipam's templates for the same convention (no shared
+   stylesheet hook exists for a plugin page). */
+.nd-10bc68{font-size:28px;font-weight:700;color:var(--primary)}
+.nd-1bcfaf{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+.nd-260fab{display:flex;gap:28px;flex-wrap:wrap}
+.nd-3de8f9{display:flex;gap:8px;flex-wrap:wrap}
+.nd-41d7d7{padding:0}
+.nd-4619ca{padding:16px 20px 12px;flex-wrap:wrap;gap:8px}
+.nd-497726{color:var(--danger)}
+.nd-5694e6{color:var(--text-muted);font-size:11px}
+.nd-5a4529{color:var(--success)}
+.nd-5e0faa{font-size:13px}
+.nd-6157e8{display:flex;gap:6px;flex-wrap:wrap}
+.nd-6cb285{font-size:12px}
+.nd-74cac9{display:flex;gap:4px}
+.nd-865c33{font-size:12px;color:var(--text-muted)}
+.nd-86abda{white-space:nowrap}
+.nd-a0c2d8{width:110px;font-size:11px;padding:3px 6px}
+.nd-c92bea{text-align:center;padding:32px;color:var(--text-muted)}
+.nd-cccfa4{display:inline}
+.nd-dc2e42{color:var(--primary)}
+.nd-deed7d{margin-top:12px;font-size:12px;color:var(--text-muted)}
+</style>
+
 {% if not job %}
-<div class="card" style="text-align:center;padding:32px;color:var(--text-muted);">
+<div class="card nd-c92bea">
     No scan data yet. Run a scan from the Discovery page.
 </div>
 {% else %}
@@ -29,44 +55,44 @@
 
 <!-- Summary bar -->
 <div class="card">
-    <div style="display:flex;gap:28px;flex-wrap:wrap;">
+    <div class="nd-260fab">
         <div>
-            <div style="font-size:28px;font-weight:700;color:var(--primary);">{{ hosts|length }}</div>
-            <div style="font-size:12px;color:var(--text-muted);">Hosts found</div>
+            <div class="nd-10bc68">{{ hosts|length }}</div>
+            <div class="nd-865c33">Hosts found</div>
         </div>
         {% for s in statuses %}
         {% if counts[s] %}
         <div>
             <div style="font-size:28px;font-weight:700;{% if s == 'unknown' %}color:var(--warning){% elif s in ('lease','reservation') %}color:var(--success){% else %}color:var(--text-muted){% endif %};">{{ counts[s] }}</div>
-            <div style="font-size:12px;color:var(--text-muted);">{{ status_labels[s] }}</div>
+            <div class="nd-865c33">{{ icon(status_icons[s]) }} {{ status_labels[s] }}</div>
         </div>
         {% endif %}
         {% endfor %}
     </div>
     {% if appeared or gone %}
-    <div style="margin-top:12px;font-size:12px;color:var(--text-muted);">
+    <div class="nd-deed7d">
         Since the previous scan:
-        {% if appeared %}<span style="color:var(--success);">+{{ appeared|length }} appeared</span> ({{ appeared|map(attribute='ip')|join(', ') }}){% endif %}
+        {% if appeared %}<span class="nd-5a4529">+{{ appeared|length }} appeared</span> ({{ appeared|map(attribute='ip')|join(', ') }}){% endif %}
         {% if appeared and gone %} · {% endif %}
-        {% if gone %}<span style="color:var(--danger);">−{{ gone|length }} gone</span> ({{ gone|map(attribute='ip')|join(', ') }}){% endif %}
+        {% if gone %}<span class="nd-497726">−{{ gone|length }} gone</span> ({{ gone|map(attribute='ip')|join(', ') }}){% endif %}
     </div>
     {% endif %}
 </div>
 
 <!-- Results table -->
 {% if hosts %}
-<div class="card" style="padding:0;">
-    <div class="card-header" style="padding:16px 20px 12px;flex-wrap:wrap;gap:8px;">
+<div class="card nd-41d7d7">
+    <div class="card-header nd-4619ca">
         <span class="card-title">Discovered Hosts</span>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;" id="nd-filters">
+        <div class="nd-6157e8" id="nd-filters">
             <button class="btn btn-sm btn-primary" data-filter-mode="all">All ({{ hosts|length }})</button>
             {% for s in statuses %}{% if counts[s] %}
-            <button class="btn btn-sm btn-secondary" data-filter-mode="{{ s }}">{{ status_labels[s] }} ({{ counts[s] }})</button>
+            <button class="btn btn-sm btn-secondary" data-filter-mode="{{ s }}">{{ icon(status_icons[s]) }} {{ status_labels[s] }} ({{ counts[s] }})</button>
             {% endif %}{% endfor %}
         </div>
     </div>
     <div class="table-wrap">
-    <table id="results-table">
+    <table id="results-table" class="rowlist">
         <thead><tr>
             <th>IP Address</th>
             <th>Hostname / Label</th>
@@ -79,32 +105,32 @@
         <tbody>
         {% for h in hosts %}
         <tr data-status="{{ h.status }}">
-            <td class="mono" style="color:var(--primary);">{{ h.ip }}</td>
-            <td style="font-size:13px;">{{ h.hostname or h.label or '—' }}{% if h.hostname and h.label %} <span style="color:var(--text-muted);font-size:11px;">({{ h.label }})</span>{% endif %}</td>
-            <td style="font-size:12px;color:var(--text-muted);">{{ h.vendor or '—' }}</td>
-            <td class="mono" style="font-size:12px;">{{ h.mac or '—' }}</td>
-            <td style="font-size:12px;{% if h.status == 'unknown' %}color:var(--warning){% elif h.status in ('lease','reservation') %}color:var(--success){% else %}color:var(--text-muted){% endif %};">{{ status_labels.get(h.status, h.status) }}</td>
-            <td style="font-size:12px;color:var(--text-muted);">{{ h.discovered_at | utcfmt if h.discovered_at else '—' }}</td>
-            <td style="white-space:nowrap;">
-                <div style="display:flex;gap:4px;">
+            <td class="mono nd-dc2e42" data-m="primary">{{ h.ip }}</td>
+            <td class="nd-5e0faa" data-m="secondary">{{ h.hostname or h.label or '—' }}{% if h.hostname and h.label %} <span class="nd-5694e6">({{ h.label }})</span>{% endif %}</td>
+            <td class="nd-865c33" data-m="hide">{{ h.vendor or '—' }}</td>
+            <td class="mono nd-6cb285" data-m="hide">{{ h.mac or '—' }}</td>
+            <td data-m="badge" class="{% if h.status == 'unknown' %}warn{% elif h.status in ('lease', 'reservation') %}ok{% endif %}">{{ icon(status_icons.get(h.status, "circle")) }} {{ status_labels.get(h.status, h.status) }}</td>
+            <td class="nd-865c33" data-m="hide">{{ h.discovered_at | utcfmt if h.discovered_at else '—' }}</td>
+            <td class="nd-86abda" data-m="trailing">
+                <div class="nd-74cac9">
                 {% if h.status == 'unknown' %}
-                <form method="POST" action="{{ url_for('network_discovery.mark_known', subnet_id=subnet_id) }}" style="display:inline;">
+                <form method="POST" action="{{ url_for('network_discovery.mark_known', subnet_id=subnet_id) }}" class="nd-cccfa4">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="ip" value="{{ h.ip }}"><input type="hidden" name="mac" value="{{ h.mac }}">
-                    <input type="text" name="note" maxlength="200" placeholder="note" style="width:110px;font-size:11px;padding:3px 6px;">
-                    <button type="submit" class="btn btn-sm btn-secondary" title="Never alert on this again">👍 Known</button>
+                    <input type="text" name="note" maxlength="200" placeholder="note" class="nd-a0c2d8">
+                    <button type="submit" class="btn btn-sm btn-secondary" title="Never alert on this again">{{ icon("circle-check") }} Known</button>
                 </form>
                 {% elif h.status == 'known' %}
-                <form method="POST" action="{{ url_for('network_discovery.mark_known', subnet_id=subnet_id) }}" style="display:inline;">
+                <form method="POST" action="{{ url_for('network_discovery.mark_known', subnet_id=subnet_id) }}" class="nd-cccfa4">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="ip" value="{{ h.ip }}"><input type="hidden" name="mac" value="{{ h.mac }}"><input type="hidden" name="action" value="forget">
                     <button type="submit" class="btn btn-sm btn-secondary" title="Count it as unknown again">Forget</button>
                 </form>
                 {% endif %}
                 {% if h.status in ('unknown', 'known', 'device', 'ipam') %}
-                <a href="/reservations/add?ip={{ h.ip }}&subnet={{ subnet_id }}{% if h.mac %}&mac={{ h.mac }}{% endif %}{% if h.hostname %}&hostname={{ h.hostname|urlencode }}{% endif %}" class="btn btn-sm btn-secondary" title="Create a Kea reservation">📌</a>
+                <a href="/reservations/add?ip={{ h.ip }}&subnet={{ subnet_id }}{% if h.mac %}&mac={{ h.mac }}{% endif %}{% if h.hostname %}&hostname={{ h.hostname|urlencode }}{% endif %}" class="btn btn-sm btn-secondary" title="Create a Kea reservation" aria-label="Create a Kea reservation">{{ icon("pin") }}</a>
                 {% if ipam_installed %}
-                <a href="/network/ipam/subnet/kea/{{ subnet_id }}?ip={{ h.ip }}" class="btn btn-sm btn-secondary" title="Add an IPAM Lite entry">📋</a>
+                <a href="/network/ipam/subnet/kea/{{ subnet_id }}?ip={{ h.ip }}" class="btn btn-sm btn-secondary" title="Add an IPAM Lite entry" aria-label="Add an IPAM Lite entry">{{ icon("clipboard-list") }}</a>
                 {% endif %}
                 {% endif %}
                 </div>
@@ -132,7 +158,7 @@ document.getElementById('nd-filters').addEventListener('click', function(e) {
 });
 </script>
 {% else %}
-<div class="card" style="text-align:center;padding:32px;color:var(--text-muted);">
+<div class="card nd-c92bea">
     No hosts found in this scan.
 </div>
 {% endif %}

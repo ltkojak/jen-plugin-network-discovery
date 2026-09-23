@@ -2,33 +2,65 @@
 {% block title %}Network Discovery{% endblock %}
 {% block content %}
 
-<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+<div class="page-header nd-1bcfaf">
     <div>
-        <h1>🔍 Network Discovery</h1>
+        <h1>{{ icon("search", "ico-lg") }} Network Discovery</h1>
         <p>Scan subnets and account for every device on them — Kea, infrastructure, IPAM, the devices Jen has seen — before calling anything unknown.</p>
     </div>
 </div>
 
+<style>
+/* v1.2.0 — static declarations moved off individual elements; see
+   jen-plugin-ipam's templates for the same convention (no shared
+   stylesheet hook exists for a plugin page). */
+.nd-09bfd1{font-size:11px;color:var(--danger)}
+.nd-115a53{width:auto;font-size:12px}
+.nd-1bcfaf{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+.nd-3244fd{margin-top:10px;font-size:11px;color:var(--text-muted)}
+.nd-58703f{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.nd-61255d{display:inline;margin-left:10px}
+.nd-6ae05f{font-weight:600;font-size:14px}
+.nd-6cb285{font-size:12px}
+.nd-749148{font-size:11px;color:var(--text-muted)}
+.nd-775b16{display:flex;gap:20px;margin-bottom:12px}
+.nd-796b22{margin:0;color:var(--text-muted)}
+.nd-7971e4{font-size:22px;font-weight:700;color:var(--primary)}
+.nd-834227{margin-top:10px;display:flex;gap:6px;align-items:center;font-size:12px}
+.nd-865c33{font-size:12px;color:var(--text-muted)}
+.nd-91a870{text-align:center}
+.nd-a6ea14{font-size:11px;color:var(--success)}
+.nd-b0ad2a{display:inline;margin-left:6px}
+.nd-b8b1bc{font-size:12px;color:var(--text-muted);margin-bottom:12px}
+.nd-c663e5{font-size:12px;color:var(--danger);margin-bottom:12px}
+.nd-c92bea{text-align:center;padding:32px;color:var(--text-muted)}
+.nd-cccfa4{display:inline}
+.nd-cd5a1e{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
+.nd-d0c748{font-size:12px;color:var(--warning);margin-bottom:12px}
+.nd-f6ebab{font-size:11px;color:var(--text)}
+.nd-f90a4f{font-size:11px;color:var(--primary)}
+.nd-fc84e9{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
+</style>
+
 {% if ipv6_enabled %}
-<div class="alert alert-info">ℹ️ Network Discovery scans IPv4 subnets only — the nmap sweep here doesn't cover IPv6 space. IPv6 devices show up on <a href="/devices?view=v6">Devices</a> instead, read from Kea's own lease table.</div>
+<div class="alert alert-info">{{ icon("info") }} Network Discovery scans IPv4 subnets only — the nmap sweep here doesn't cover IPv6 space. IPv6 devices show up on <a href="/devices?view=v6">Devices</a> instead, read from Kea's own lease table.</div>
 {% endif %}
 
 {% if not scanner_ok %}
 <div class="alert alert-warning">
-    ⚠️ <strong>nmap not found.</strong> Network Discovery needs nmap on the Jen host.
+    {{ icon("triangle-alert") }} <strong>nmap not found.</strong> Network Discovery needs nmap on the Jen host.
     {% if can_install_nmap %}
-    <form method="POST" action="/settings/plugins/deps/{{ plugin_id }}" style="display:inline;margin-left:10px;">
+    <form method="POST" action="/settings/plugins/deps/{{ plugin_id }}" class="nd-61255d">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit" class="btn btn-sm btn-primary">⬇ Install nmap</button>
+        <button type="submit" class="btn btn-sm btn-primary">{{ icon("download") }} Install nmap</button>
     </form>
-    <span class="form-hint" style="display:inline;margin-left:6px;">Installs it through Jen's root-run plugin service; Settings → Plugins shows progress.</span>
+    <span class="form-hint nd-b0ad2a">Installs it through Jen's root-run plugin service; Settings → Plugins shows progress.</span>
     {% else %}
-    <br><code style="font-size:12px;">sudo apt install nmap</code>
+    <br><code class="nd-6cb285">sudo apt install nmap</code>
     {% endif %}
 </div>
 {% else %}
-<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
-    Scanner: ✅ nmap, run unprivileged. On a subnet the Jen host is directly attached to, every device that answers
+<div class="nd-b8b1bc">
+    Scanner: {{ icon("circle-check") }} nmap, run unprivileged. On a subnet the Jen host is directly attached to, every device that answers
     ARP is found and its MAC recorded. On a routed subnet only hosts answering a common TCP port (22, 80, 443, 445,
     3389, 8080, 8443, 9100) are found, without MACs. Every host found is checked against Kea's leases and
     reservations, the subnet's gateway/DNS/Kea/Jen addresses, IPAM Lite entries, the devices Jen has seen, and your
@@ -36,52 +68,52 @@
 </div>
 {% endif %}
 
-<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;">
+<div class="nd-cd5a1e">
 {% for subnet_id, info in subnet_map.items() %}
 {% set last = scan_summary.get(subnet_id, {}) %}
 {% set scope = scope_errors.get(subnet_id) %}
 <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
+    <div class="nd-fc84e9">
         <div>
-            <div style="font-weight:600;font-size:14px;">{{ info.name }}</div>
-            <div style="font-size:12px;color:var(--text-muted);">{{ info.cidr }}</div>
+            <div class="nd-6ae05f">{{ info.name }}</div>
+            <div class="nd-865c33">{{ info.cidr }}</div>
         </div>
         {% if last.get('status') == 'running' %}
-        <span style="font-size:11px;color:var(--primary);" id="status-{{ subnet_id }}">⏳ Scanning…</span>
+        <span class="nd-f90a4f" id="status-{{ subnet_id }}">{{ icon("hourglass") }} Scanning…</span>
         {% elif last.get('status') == 'queued' %}
-        <span style="font-size:11px;color:var(--text-muted);" id="status-{{ subnet_id }}">⏳ Queued</span>
+        <span class="nd-749148" id="status-{{ subnet_id }}">{{ icon("hourglass") }} Queued</span>
         {% elif last.get('status') == 'done' %}
-        <span style="font-size:11px;color:var(--success);">✓ Done</span>
+        <span class="nd-a6ea14">✓ Done</span>
         {% elif last.get('status') == 'error' %}
-        <span style="font-size:11px;color:var(--danger);" title="{{ last.get('error') or '' }}">✗ Error</span>
+        <span class="nd-09bfd1" title="{{ last.get('error') or '' }}">✗ Error</span>
         {% else %}
-        <span style="font-size:11px;color:var(--text-muted);">Never scanned</span>
+        <span class="nd-749148">Never scanned</span>
         {% endif %}
     </div>
 
     {% if scope %}
-    <div style="font-size:12px;color:var(--warning);margin-bottom:12px;">{{ scope }}</div>
+    <div class="nd-d0c748">{{ scope }}</div>
     {% endif %}
 
     {% if last.get('status') == 'done' %}
-    <div style="display:flex;gap:20px;margin-bottom:12px;">
-        <div style="text-align:center;">
-            <div style="font-size:22px;font-weight:700;color:var(--primary);">{{ last.hosts_found }}</div>
-            <div style="font-size:11px;color:var(--text-muted);">Hosts found</div>
+    <div class="nd-775b16">
+        <div class="nd-91a870">
+            <div class="nd-7971e4">{{ last.hosts_found }}</div>
+            <div class="nd-749148">Hosts found</div>
         </div>
-        <div style="text-align:center;">
+        <div class="nd-91a870">
             <div style="font-size:22px;font-weight:700;{% if last.rogue_count > 0 %}color:var(--warning){% else %}color:var(--success){% endif %};">{{ last.rogue_count }}</div>
-            <div style="font-size:11px;color:var(--text-muted);">Unknown</div>
+            <div class="nd-749148">Unknown</div>
         </div>
-        <div style="text-align:center;">
-            <div style="font-size:11px;color:var(--text-muted);">Last scan</div>
-            <div style="font-size:11px;color:var(--text);">{{ last.finished_at | utcfmt if last.finished_at else '—' }}</div>
+        <div class="nd-91a870">
+            <div class="nd-749148">Last scan</div>
+            <div class="nd-f6ebab">{{ last.finished_at | utcfmt if last.finished_at else '—' }}</div>
         </div>
     </div>
     {% elif last.get('status') == 'error' %}
-    <div style="font-size:12px;color:var(--danger);margin-bottom:12px;">✗ {{ last.get('error') or 'scan failed — see the Jen log' }}</div>
+    <div class="nd-c663e5">✗ {{ last.get('error') or 'scan failed — see the Jen log' }}</div>
     {% elif last.get('status') in ('running', 'queued') %}
-    <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">
+    <div class="nd-b8b1bc">
         {% if last.get('status') == 'queued' %}Queued — waiting for another scan to finish…{% else %}Scan in progress…{% endif %} <span id="dots-{{ subnet_id }}">.</span>
     </div>
     <script nonce="{{ csp_nonce }}">
@@ -103,23 +135,23 @@
     </script>
     {% endif %}
 
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+    <div class="nd-58703f">
         {% if last.get('status') in ('done', 'error') %}
         <a href="{{ url_for('network_discovery.results', subnet_id=subnet_id) }}" class="btn btn-sm btn-secondary">View Results</a>
         {% endif %}
         {% if scanner_ok and last.get('status') not in ('running', 'queued') and not scope %}
-        <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}" style="display:inline;">
+        <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}" class="nd-cccfa4">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm btn-primary">{% if last.get('status') %}🔄 Re-scan{% else %}🔍 Scan Now{% endif %}</button>
+            <button type="submit" class="btn btn-sm btn-primary">{% if last.get('status') %}{{ icon("refresh-cw") }} Re-scan{% else %}{{ icon("search") }} Scan Now{% endif %}</button>
         </form>
         {% endif %}
     </div>
 
     {% if is_superadmin and not scope %}
-    <form method="POST" action="{{ url_for('network_discovery.set_schedule', subnet_id=subnet_id) }}" style="margin-top:10px;display:flex;gap:6px;align-items:center;font-size:12px;">
+    <form method="POST" action="{{ url_for('network_discovery.set_schedule', subnet_id=subnet_id) }}" class="nd-834227">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <label style="margin:0;color:var(--text-muted);">Scan every</label>
-        <select name="every_hours" style="width:auto;font-size:12px;">
+        <label class="nd-796b22">Scan every</label>
+        <select name="every_hours" class="nd-115a53">
             {% for h in schedule_choices %}
             <option value="{{ h }}" {% if schedules.get(subnet_id, 0) == h %}selected{% endif %}>{% if h == 0 %}off{% elif h == 168 %}week{% else %}{{ h }} h{% endif %}</option>
             {% endfor %}
@@ -127,11 +159,11 @@
         <button type="submit" class="btn btn-sm btn-secondary">Save</button>
     </form>
     {% elif schedules.get(subnet_id, 0) %}
-    <div style="margin-top:10px;font-size:11px;color:var(--text-muted);">⏱ scheduled every {{ schedules.get(subnet_id) }} h</div>
+    <div class="nd-3244fd">{{ icon("timer") }} scheduled every {{ schedules.get(subnet_id) }} h</div>
     {% endif %}
 </div>
 {% else %}
-<div class="card" style="text-align:center;padding:32px;color:var(--text-muted);">
+<div class="card nd-c92bea">
     No accessible subnets found.
 </div>
 {% endfor %}

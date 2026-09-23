@@ -6,7 +6,7 @@ Scan your subnets and account for every device on them. Finds every live host on
 
 ## Requirements
 
-- [Jen](https://github.com/ltkojak/jen-kea) v5.30.0 or later (v1.0.x runs on 5.28.2+)
+- [Jen](https://github.com/ltkojak/jen-kea) v5.57.0 or later (v1.1.x runs on 5.34.0+)
 - `nmap` on the Jen host — Settings → Plugins offers an **Install nmap** button on a systemd host (through Jen's root-run plugin service); elsewhere:
   ```bash
   sudo apt install nmap
@@ -31,7 +31,8 @@ Each found host gets one status, first match wins: `lease` (an active Kea lease,
 - Manual scan per subnet (background, auto-refreshing) and **scheduled scans** (superadmin; every 6/12/24 h or weekly, through Jen's periodic-job hook); a second scan of a subnet already mid-scan is refused; subnets larger than a /20 are refused with a reason and the nmap timeout scales with the subnet
 - Results page: IP, hostname/label, vendor, MAC, status (filter by any), what changed since the previous scan, CSV export; per host: **Known** (never alert again, with a note), **create reservation** (prefilled), **add IPAM entry**
 - Keeps the last 3 scans per subnet
-- Fires Jen's `rogue_device` alert (opt a channel into it under Settings → Alerts) — only for *unknown* hosts the previous scan hadn't seen, compared by MAC so an IP hop doesn't re-alert; the alert lists hostname, vendor and MAC
+- Fires its own "Rogue Device" alert (opt a channel into it under Settings → Alerts) — only for *unknown* hosts the previous scan hadn't seen, compared by MAC so an IP hop doesn't re-alert; the alert lists hostname, vendor and MAC. A new unknown also writes a `discovery.unknown` event to Jen's Timeline
+- Discovered hosts show up in Jen's global search by MAC, IP, hostname, label or vendor, with when they were last seen
 - Respects Jen subnet access control — restricted users only see and scan their assigned subnets; scanning and marking a host known both need admin — viewers are read-only. Known applies to every subnet Jen scans; marking needs admin
 
 ## Installation

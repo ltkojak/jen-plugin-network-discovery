@@ -1,5 +1,34 @@
 # Network Discovery Plugin — Changelog
 
+## [1.2.0] - 2026-09-23
+
+### Sprite icons, a rowlist results table, a Timeline event per new unknown, and a search provider — built on Jen's plugin API v3
+
+Every emoji in the two pages — including the seven `_STATUSES` labels —
+is now a sprite icon via Jen's own `icon()` global, and the 60 inline
+`style="…"` attributes are gone, moved into named classes in a
+page-local `<style>` block, the same convention `jen-plugin-ipam`
+1.6.0 uses. The results table is now a `rowlist` with `data-m` on
+every cell.
+
+Two changes to how a new unknown host is reported. It now also
+`emit`s a `discovery.unknown` event — a kind core Jen has reserved for
+this plugin since Q43 — so it shows up on the Timeline and in Client
+Investigation, not only in an alert channel. And the alert itself
+moves off Jen core's hard-coded `rogue_device` type onto one this
+plugin registers for itself, `network-discovery_rogue_device` (still
+labelled "Rogue Device", same icon, same message shape) — `rogue_device`
+stays in Jen core as a legacy entry so an install whose channels
+already opted into it keeps working, but this plugin no longer sends
+under it.
+
+Last: discovered hosts are now in Jen's global search by MAC, IP,
+hostname, label or vendor, showing when they were last seen and
+linking straight to that subnet's results.
+
+Requires Jen 5.57.0 (plugin API v3) — the `emit`, `register_alert_type`
+and search-provider hooks all shipped there.
+
 ## [1.1.2] - 2026-09-23
 
 ### Viewers were never actually read-only, and two clicks could queue the same subnet twice

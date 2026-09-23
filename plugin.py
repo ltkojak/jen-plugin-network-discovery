@@ -99,14 +99,26 @@ _NEIGH_FRESH = {"REACHABLE", "DELAY", "PROBE", "PERMANENT"}
 _NEIGH_DEAD = {"FAILED", "INCOMPLETE", "NONE"}
 
 _STATUSES = ("lease", "reservation", "infrastructure", "ipam", "device", "known", "unknown")
+# v1.2.0 — split from a combined "glyph + text" string into an icon name
+# (a sprite via Jen's icon() Jinja global) and plain label text, so the
+# templates render a real icon instead of a bare emoji character.
 _STATUS_LABELS = {
-    "lease": "✓ Kea lease",
-    "reservation": "✓ Kea reservation",
-    "infrastructure": "◆ Infrastructure",
-    "ipam": "📋 IPAM entry",
-    "device": "🖥 Known device",
-    "known": "👍 Marked known",
-    "unknown": "⚠ Unknown",
+    "lease": "Kea lease",
+    "reservation": "Kea reservation",
+    "infrastructure": "Infrastructure",
+    "ipam": "IPAM entry",
+    "device": "Known device",
+    "known": "Marked known",
+    "unknown": "Unknown",
+}
+_STATUS_ICONS = {
+    "lease": "circle-check",
+    "reservation": "circle-check",
+    "infrastructure": "server",
+    "ipam": "clipboard-list",
+    "device": "monitor-smartphone",
+    "known": "circle-check",
+    "unknown": "triangle-alert",
 }
 _INFRA_LABELS = {
     "gateway": "Gateway",
@@ -710,6 +722,7 @@ def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
 
         if fresh:
             _alert_new_unknowns(subnet_id, fresh, unknown_count, trigger)
+            _emit_new_unknowns(subnet_id, fresh)
 
     except Exception as e:
         logger.error(f"Network Discovery scan error: {e}")
@@ -722,10 +735,17 @@ def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
     return job_id
 
 
+# v1.2.0 — Discovery now registers its own alert type through the plugin
+# API (register_alert_type) instead of sending under Jen core's hard-coded
+# "rogue_device". Jen keeps "rogue_device" itself as a legacy entry for
+# installs whose channels already opted into it (see Jen's alerts.py).
+_ROGUE_ALERT_TYPE = "network-discovery_rogue_device"
+
+
 def _alert_new_unknowns(subnet_id, fresh, unknown_count, trigger):
-    """Jen's `rogue_device` alert type (a channel opts into it under
-    Settings → Alerts). subnet_id lets a subnet-scoped channel filter
-    it like any other per-subnet alert."""
+    """`_ROGUE_ALERT_TYPE` (a channel opts into it under Settings → Alerts).
+    subnet_id lets a subnet-scoped channel filter it like any other
+    per-subnet alert."""
     try:
         from jen.plugin_api import send_alert
 
@@ -744,7 +764,7 @@ def _alert_new_unknowns(subnet_id, fresh, unknown_count, trigger):
         if len(fresh) > 10:
             listed += f"\n  … and {len(fresh) - 10} more"
         send_alert(
-            alert_type="rogue_device",
+            alert_type=_ROGUE_ALERT_TYPE,
             subnet_id=subnet_id,
             subject=f"⚠️ {len(fresh)} new unknown device(s) on {subnet_name}",
             body=(
@@ -756,6 +776,31 @@ def _alert_new_unknowns(subnet_id, fresh, unknown_count, trigger):
         )
     except Exception as e:
         logger.warning(f"Network Discovery: could not send alert: {e}")
+
+
+def _emit_new_unknowns(subnet_id, fresh):
+    """emit() one `discovery.unknown` event per new unknown host (a core
+    KINDS entry reserved for this release — jen/services/events.py) so
+    the Timeline and Client Investigation see it, same as any other
+    lease/reservation event."""
+    try:
+        from jen.plugin_api import emit
+
+        subnet_name = _subnet_map().get(subnet_id, {}).get("name", str(subnet_id))
+        for h in fresh:
+            detail = f"new unknown host on {subnet_name}"
+            if h.get("vendor"):
+                detail += f" ({h['vendor']})"
+            emit(
+                "discovery.unknown",
+                mac=h.get("mac") or None,
+                ip=h.get("ip"),
+                subnet_id=subnet_id,
+                hostname=h.get("hostname") or None,
+                detail=detail,
+            )
+    except Exception as e:
+        logger.warning(f"Network Discovery: could not emit discovery.unknown: {e}")
 
 
 def _expire_stale_running_jobs(cur):
@@ -1082,6 +1127,7 @@ def results(subnet_id):
         counts=counts,
         statuses=_STATUSES,
         status_labels=_STATUS_LABELS,
+        status_icons=_STATUS_ICONS,
         appeared=appeared,
         gone=gone,
         ipam_installed=ipam_installed,
@@ -1274,6 +1320,55 @@ def api_scan_status(subnet_id):
             db.close()
 
 
+# ── Search provider (v1.2.0, plugin API v3) ───────────────────────────────────
+
+
+def _discovery_search(query, accessible_subnet_ids, all_subnets):
+    """register_search_provider callback — a MAC, IP, hostname, label or
+    vendor found in the most recent completed scan of a subnet. Jen
+    re-filters by subnet_id itself afterward (the Q55 rule)."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    like = f"%{q}%"
+    out = []
+    db = None
+    try:
+        db = _get_db()
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.ip, r.mac, r.hostname, r.label, r.vendor, r.discovered_at, j.subnet_id
+                FROM nd_scan_results r
+                JOIN nd_scan_jobs j ON j.id = r.job_id
+                WHERE j.status = 'done'
+                  AND (r.mac LIKE %s OR r.ip LIKE %s OR r.hostname LIKE %s OR r.label LIKE %s OR r.vendor LIKE %s)
+                ORDER BY r.discovered_at DESC LIMIT 20
+                """,
+                (like, like, like, like, like),
+            )
+            for row in cur.fetchall():
+                bits = [row["ip"]]
+                if row.get("mac"):
+                    bits.append(row["mac"])
+                if row.get("discovered_at"):
+                    bits.append("last seen " + row["discovered_at"].strftime("%Y-%m-%d %H:%M"))
+                out.append(
+                    {
+                        "title": row.get("hostname") or row.get("label") or row["ip"],
+                        "subtitle": " · ".join(bits),
+                        "href": f"/network/discovery/results/{row['subnet_id']}",
+                        "subnet_id": row["subnet_id"],
+                    }
+                )
+    except Exception as e:
+        logger.error(f"Network Discovery: search provider failed: {e}")
+    finally:
+        if db:
+            db.close()
+    return out
+
+
 def register(app):
     app.register_blueprint(bp)
     # v1.1.0 — scheduled scans through Jen's periodic-job hook (5.30.0).
@@ -1284,4 +1379,16 @@ def register(app):
         register_periodic(PLUGIN_ID, "scheduled-scans", _scheduled_tick, _SCHEDULE_TICK_MINUTES)
     except Exception as e:
         logger.warning(f"Network Discovery: scheduled scans unavailable on this Jen: {e}")
+
+    from jen.plugin_api import register_alert_type, register_search_provider
+
+    register_alert_type(
+        PLUGIN_ID,
+        _ROGUE_ALERT_TYPE,
+        label="Rogue Device",
+        icon="siren",
+        default_template="🚨 <b>{subject}</b>\n{body}",
+    )
+    register_search_provider(PLUGIN_ID, title="Network Discovery", fn=_discovery_search)
+
     logger.info("Network Discovery plugin registered")
