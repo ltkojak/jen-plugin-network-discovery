@@ -44,6 +44,43 @@ def _stub_modules():
     sys.modules["flask_login"] = fl
 
 
+class _FakeApp:
+    def register_blueprint(self, bp):
+        pass
+
+
+def _stub_jen_plugin_api():
+    """A stub `jen.plugin_api` sufficient for register(app) to run end to end, enforcing the SAME two
+    rules Jen's real one does: an alert type id must start with '<plugin_id>_', and a periodic job may
+    not run more often than PERIODIC_MIN_MINUTES (5). Watchdog and DNS Sync shipped unable to load
+    because a plugin's own register() broke one of them and nothing ever called it (Q89); this
+    harness predates that lesson. Note register() here wraps register_periodic in a try/except, so a
+    violation would be SWALLOWED and the scheduled scans silently absent — hence the check below
+    that the call actually landed. Returns the registered calls."""
+    calls = {"alert_types": [], "periodic": [], "search": []}
+
+    def register_alert_type(plugin_id, type_id, **kwargs):
+        prefix = f"{plugin_id}_"
+        if not type_id.startswith(prefix):
+            raise ValueError(f"type_id {type_id!r} must start with {prefix!r}")
+        calls["alert_types"].append(type_id)
+
+    def register_periodic(plugin_id, name, fn, every_minutes):
+        if every_minutes < 5:
+            raise ValueError("every_minutes must be at least 5")
+        calls["periodic"].append((plugin_id, name, every_minutes))
+
+    jen_pkg = types.ModuleType("jen")
+    plugin_api = types.ModuleType("jen.plugin_api")
+    plugin_api.register_alert_type = register_alert_type
+    plugin_api.register_periodic = register_periodic
+    plugin_api.register_search_provider = lambda *a, **k: calls["search"].append(a)
+    jen_pkg.plugin_api = plugin_api
+    sys.modules["jen"] = jen_pkg
+    sys.modules["jen.plugin_api"] = plugin_api
+    return calls
+
+
 def load_plugin():
     _stub_modules()
     spec = importlib.util.spec_from_file_location("nd_plugin", os.path.join(ROOT, "plugin.py"))
@@ -242,6 +279,25 @@ def main():
         check(gated, f"{fn.__name__} refuses a viewer before touching the request")
     p.current_user.role = "superadmin"
     check(p._is_admin() is True, "superadmin role restored for the rest of the run")
+
+    # ── register(): runs end to end against a stub that enforces Jen's rules ──
+    calls = _stub_jen_plugin_api()
+    try:
+        p.register(_FakeApp())
+        registered = True
+    except Exception as e:
+        registered = False
+        print(f"      register() raised: {e}")
+    check(registered, "register(): runs end to end without raising against a real-rule stub")
+    check(
+        calls["alert_types"] == [p._ROGUE_ALERT_TYPE],
+        f"register(): the rogue-device alert type is registered under the plugin's own prefix (got {calls['alert_types']})",
+    )
+    check(
+        calls["periodic"] == [("network-discovery", "scheduled-scans", p._SCHEDULE_TICK_MINUTES)],
+        f"register(): the scheduled-scan tick actually registered — its failure is swallowed, so absence is silent (got {calls['periodic']})",
+    )
+    check(len(calls["search"]) == 1, "register(): one search provider")
 
     if failures:
         print(f"\n{len(failures)} check(s) failed")
