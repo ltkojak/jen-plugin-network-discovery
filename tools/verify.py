@@ -21,6 +21,10 @@ docs/ui.md): static declarations belong in the page's own <style> block, and a
 script hides or shows an element with a class or `el.style.display`, which the CSP
 allows. Exit status is non-zero on the first failure, with every failing check
 listed. Nothing here needs a database or the `jen` package.
+
+Every POST <form> must also carry csrf_token (added with the Q98 sweep): Jen's own
+tests/test_template_csrf.py exists because a form without one 403's on every save with no
+hint why, and this repo's CI should catch that before it reaches Jen's bundled-copy scan.
 """
 
 import io
@@ -41,6 +45,9 @@ ZIP_FLAT_FILES = ["manifest.json", "plugin.py", "README.md", "CHANGELOG.md", "LI
 _INLINE_HANDLER_RE = re.compile(r"""\son[a-z]+\s*=\s*["']""", re.I)
 _INLINE_STYLE_RE = re.compile(r"""\sstyle\s*=\s*["']""", re.I)
 _SCRIPT_OPEN_RE = re.compile(r"<script\b[^>]*>", re.I)
+# Same pattern as Jen's own tests/test_plugin_template_csrf.py, copied here
+# so a missing csrf_token fails THIS repo's CI, not just Jen's bundled scan.
+_POST_FORM_RE = re.compile(r'<form\b[^>]*\bmethod\s*=\s*["\']POST["\'][^>]*>.*?</form>', re.IGNORECASE | re.DOTALL)
 _CHANGELOG_HEAD_RE = re.compile(r"^## \[(\d+\.\d+\.\d+)\]", re.M)
 
 failures = []
@@ -163,10 +170,16 @@ def check_templates():
                 if "nonce=" not in tag:
                     lineno = src.count("\n", 0, sm.start()) + 1
                     fail(f'{rel}:{lineno}: <script> without nonce="{{{{ csp_nonce }}}}" (blocked by Jen\'s CSP)')
+            for i, form_html in enumerate(_POST_FORM_RE.findall(src)):
+                if "csrf_token" not in form_html:
+                    fail(f"{rel}: POST form #{i + 1} has no csrf_token field - every submission 403s")
     if count == 0:
         fail("no templates found under templates/")
     elif not any(f.startswith("templates/") for f in failures):
-        ok(f"{count} template(s) parse; no inline handlers or style attributes; every <script> nonce'd")
+        ok(
+            f"{count} template(s) parse; no inline handlers or style attributes; every <script> nonce'd; "
+            "every POST form has csrf_token"
+        )
 
 
 def check_line_endings():

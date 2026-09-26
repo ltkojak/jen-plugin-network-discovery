@@ -29,11 +29,11 @@ Each found host gets one status, first match wins: `lease` (an active Kea lease,
 
 - Per-subnet scan cards showing last scan time, hosts found, unknown count, and the reason if a scan failed
 - Manual scan per subnet (background, auto-refreshing) and **scheduled scans** (superadmin; every 6/12/24 h or weekly, through Jen's periodic-job hook); a second scan of a subnet already mid-scan is refused; subnets larger than a /20 are refused with a reason and the nmap timeout scales with the subnet
-- Results page: IP, hostname/label, vendor, MAC, status (filter by any), what changed since the previous scan, CSV export; per host: **Known** (never alert again, with a note), **create reservation** (prefilled), **add IPAM entry**
+- Results page: IP, hostname/label, vendor, MAC, status (filter by any), what changed since the previous scan, CSV export; per host: **Known** (never alert again, with a note; administrators who can see every subnet), **create reservation** (prefilled), **add IPAM entry**
 - Keeps the last 3 scans per subnet
 - Fires its own "Rogue Device" alert (opt a channel into it under Settings → Alerts) — only for *unknown* hosts the previous scan hadn't seen, compared by MAC so an IP hop doesn't re-alert; the alert lists hostname, vendor and MAC. A new unknown also writes a `discovery.unknown` event to Jen's Timeline
 - Discovered hosts show up in Jen's global search by MAC, IP, hostname, label or vendor, with when they were last seen
-- Respects Jen subnet access control — restricted users only see and scan their assigned subnets; scanning and marking a host known both need admin — viewers are read-only. Known applies to every subnet Jen scans; marking needs admin
+- Respects Jen subnet access control — restricted users only see and scan their assigned subnets; scanning needs an admin, and viewers are read-only. The known list applies to every subnet Jen scans, so marking or forgetting a host needs an administrator who can see every subnet (an admin scoped to some subnets sees the Known and Forget buttons removed and is refused if the request is made anyway; since 1.2.2)
 
 ## Installation
 

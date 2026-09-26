@@ -75,6 +75,7 @@ def _stub_jen_plugin_api():
     plugin_api.register_alert_type = register_alert_type
     plugin_api.register_periodic = register_periodic
     plugin_api.register_search_provider = lambda *a, **k: calls["search"].append(a)
+    plugin_api.assert_subnet_access = lambda subnet_id: True
     jen_pkg.plugin_api = plugin_api
     sys.modules["jen"] = jen_pkg
     sys.modules["jen.plugin_api"] = plugin_api
@@ -279,6 +280,279 @@ def main():
         check(gated, f"{fn.__name__} refuses a viewer before touching the request")
     p.current_user.role = "superadmin"
     check(p._is_admin() is True, "superadmin role restored for the rest of the run")
+
+    _stub_jen_plugin_api()  # the routes below import assert_subnet_access from it
+
+    # ── 1.2.2: pruning never deletes the newest completed scan ───────────────
+    def _simulate(statuses):
+        """Run scans with these outcomes in order (only a completed one prunes, as in the plugin);
+        returns the jobs left, newest first, and whether a completed baseline existed at each finish."""
+        jobs, baselines = [], []
+        for jid, status in enumerate(statuses):
+            others = list(jobs)
+            baselines.append(any(j["status"] == "done" for j in others))
+            gone = set(p.jobs_to_prune(others, p._KEEP_JOBS)) if status == "done" else set()
+            jobs = [{"id": jid, "status": status}] + [j for j in others if j["id"] not in gone]
+        return jobs, baselines
+
+    left, baselines = _simulate(["done", "error", "error", "done", "done"])
+    check(
+        baselines[-1] and left[0]["status"] == "done",
+        "prune: done, error, error, done, done keeps a baseline throughout",
+    )
+    check(
+        p.jobs_to_prune([{"id": 6, "status": "error"}, {"id": 5, "status": "error"}, {"id": 4, "status": "done"}], 3)
+        == [],
+        "jobs_to_prune: the newest done job survives two newer failures",
+    )
+    check(
+        p.jobs_to_prune(
+            [
+                {"id": 9, "status": "done"},
+                {"id": 8, "status": "error"},
+                {"id": 7, "status": "error"},
+                {"id": 6, "status": "done"},
+            ],
+            3,
+        )
+        == [7, 6],
+        "jobs_to_prune: everything older than the window and the newest done goes",
+    )
+    check(
+        p.jobs_to_prune([{"id": 5, "status": "done"}, {"id": 4, "status": "done"}, {"id": 3, "status": "queued"}], 2)
+        == [4],
+        "jobs_to_prune: a queued job is never pruned (its thread will still write to it)",
+    )
+    check(p.jobs_to_prune([], 3) == [], "jobs_to_prune: nothing to prune")
+
+    class FakeDB:
+        """Records every statement; answers from `script` (a function of the last SQL and params)."""
+
+        def __init__(self, answer=None, fail_on=None):
+            self.log, self.answer, self.fail_on = [], answer or (lambda sql, params: None), fail_on
+            self.sql, self.params, self.lastrowid = "", (), 1
+
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=()):
+            self.sql, self.params = " ".join(sql.split()), params
+            self.log.append((self.sql, params))
+            if self.fail_on and self.fail_on in self.sql:
+                raise RuntimeError("boom-marker")
+
+        def fetchone(self):
+            r = self.answer(self.sql, self.params)
+            return r[0] if isinstance(r, list) and r else (None if isinstance(r, list) else r)
+
+        def fetchall(self):
+            r = self.answer(self.sql, self.params)
+            return r if isinstance(r, list) else ([r] if r else [])
+
+        def commit(self):
+            self.log.append(("COMMIT", ()))
+
+        def rollback(self):
+            self.log.append(("ROLLBACK", ()))
+
+        def close(self):
+            pass
+
+    # ── 1.2.2: a scan run end to end against a fake database ─────────────────
+    ctx_full = {"gateways": [], "dns": [], "pools": [], "infrastructure": {}, "notes": ""}
+    long_name = "h" * 300
+    p._scan_subnet = lambda cidr: {"hosts": [{"ip": "10.0.0.5", "mac": "", "hostname": long_name}]}
+    p._subnet_ctx = lambda sid, cidr: ctx_full
+    p._load_kea = lambda sid: (set(), set(), set(), set())
+    p._load_ipam = lambda sid: ({}, {})
+    p._load_devices = lambda macs: {}
+    p._load_known = dict
+    fdb = FakeDB()
+    p._get_db = lambda: fdb
+    p._run_scan_job(1, "10.0.0.0/24", 7)
+    inserts = [prm for sql, prm in fdb.log if sql.startswith("INSERT INTO nd_scan_results")]
+    check(
+        len(inserts) == 1 and len(inserts[0][3]) == 255,
+        "scan: a 300-character hostname is truncated to the column's 255",
+    )
+    check(
+        any("UPDATE nd_scan_jobs SET status=%s" in sql and prm[0] == "done" for sql, prm in fdb.log),
+        "scan: a run whose insert succeeds is marked done",
+    )
+    fdb = FakeDB(fail_on="INSERT INTO nd_scan_results")
+    p._get_db = lambda: fdb
+    p._run_scan_job(1, "10.0.0.0/24", 8)
+    verbs = [sql.split()[0] for sql, _p in fdb.log]
+    marked = [
+        i for i, (sql, prm) in enumerate(fdb.log) if "UPDATE nd_scan_jobs SET status=%s" in sql and prm[0] == "error"
+    ]
+    check(
+        marked and "ROLLBACK" in verbs and verbs.index("ROLLBACK") < marked[0],
+        "scan: a run that fails after staging its prune rolls back BEFORE it records the error (the prune is not committed)",
+    )
+
+    # ── 1.2.2: a queued job is not expired while its thread is alive ──────────
+    class StaleCursor:
+        def __init__(self):
+            self.log = []
+
+        def execute(self, sql, params=()):
+            self.last = " ".join(sql.split())
+            self.log.append((self.last, params))
+
+        def fetchall(self):
+            return (
+                [{"id": 11}, {"id": 12}]
+                if self.last.startswith("SELECT id FROM nd_scan_jobs WHERE status='queued'")
+                else []
+            )
+
+    p._live_jobs.clear()
+    p._live_jobs.add(11)
+    sc = StaleCursor()
+    p._expire_stale_running_jobs(sc)
+    expired = [prm for sql, prm in sc.log if sql.startswith("UPDATE") and "WHERE id=%s AND status='queued'" in sql]
+    check(
+        expired == [(12,)],
+        f"expiry: an old queued job whose thread is alive stays queued; a leftover expires (got {expired})",
+    )
+    check(
+        any("status='running' AND started_at <" in sql for sql, _p in sc.log),
+        "expiry: a running job past the window still expires by age",
+    )
+    p._live_jobs.clear()
+
+    # ── 1.2.2: the results page shows the latest COMPLETED scan ──────────────
+    def results_answer(sql, params):
+        if "FROM nd_scan_results WHERE job_id=%s" in sql or "FROM nd_scan_results WHERE job_id" in sql:
+            row = {
+                "ip": "10.0.0.5",
+                "mac": "aa:aa:aa:aa:aa:05",
+                "hostname": "h",
+                "in_kea": 1,
+                "rogue": 0,
+                "status": "lease",
+                "label": "",
+                "vendor": "",
+                "device_type": "",
+                "discovered_at": None,
+            }
+            return [dict(row)]
+        if "AND id != %s AND status='done'" in sql:
+            return {"id": 2}
+        if "status='done'" in sql:
+            return {
+                "id": 3,
+                "status": "done",
+                "started_at": None,
+                "finished_at": None,
+                "hosts_found": 1,
+                "rogue_count": 0,
+                "error": None,
+            }
+        return {
+            "id": 4,
+            "status": "error",
+            "started_at": None,
+            "finished_at": None,
+            "hosts_found": 0,
+            "rogue_count": 0,
+            "error": "timed out",
+        }
+
+    p._subnet_map = lambda: {1: {"name": "n", "cidr": "10.0.0.0/24"}}
+    p.render_template = lambda name, **kw: kw
+    p.url_for = lambda *a, **k: "/x"
+    p.redirect = lambda where: ("redirect", where)
+    p.flash = lambda *a, **k: None
+    p._get_db = lambda: FakeDB(results_answer)
+    page = p.results(1)
+    check(
+        page["job"]["id"] == 3 and page["newer_job"]["id"] == 4 and len(page["hosts"]) == 1,
+        "results: the latest done scan is shown, with the newer failed one named for the banner",
+    )
+    check(
+        page["gone"] == [] and page["appeared"] == [], "results: a failed newest scan does not list every host as gone"
+    )
+
+    def only_error(sql, params):
+        if "FROM nd_scan_results" in sql or "status='done'" in sql:
+            return []
+        return {
+            "id": 4,
+            "status": "error",
+            "started_at": None,
+            "finished_at": None,
+            "hosts_found": 0,
+            "rogue_count": 0,
+            "error": "x",
+        }
+
+    p._get_db = lambda: FakeDB(only_error)
+    page = p.results(1)
+    check(
+        page["job"]["id"] == 4 and page["newer_job"] is None and page["hosts"] == [],
+        "results: with no completed scan the failed one is shown as before",
+    )
+
+    # ── 1.2.2: the known-hosts list is an all-subnets object ─────────────────
+    _stub_jen_plugin_api()
+    for role, all_subnets, expect in (
+        ("admin", False, False),
+        ("admin", True, True),
+        ("viewer", True, False),
+        ("superadmin", True, True),
+    ):
+        p.current_user.role, p.current_user.all_subnets = role, all_subnets
+        check(
+            p._can_change_known() is expect, f"_can_change_known: a {role} with all_subnets={all_subnets} -> {expect}"
+        )
+    flashed = []
+    p.flash = lambda msg, cat="message": flashed.append(msg)
+    p.current_user.role, p.current_user.all_subnets = "admin", False
+    p.request = types.SimpleNamespace(form={"ip": "10.0.0.99", "mac": "", "note": "x"})
+    fdb = FakeDB()
+    p._get_db = lambda: fdb
+    p.mark_known(1)
+    check(fdb.log == [] and flashed, "mark_known: a subnet-scoped admin is refused and nothing is written")
+    p.current_user.all_subnets = True
+    flashed.clear()
+    p.mark_known(1)
+    check(
+        any(sql.startswith("INSERT INTO nd_known_hosts") for sql, _p in fdb.log),
+        "mark_known: an admin who sees every subnet can mark a host",
+    )
+    for bad in ("aaaaaaaaaaaaaaaaa", "aa:bb", "zz:zz:zz:zz:zz:zz", "aa:aa:aa:aa:aa:aa:aa"):
+        fdb = FakeDB()
+        p._get_db = lambda fdb=fdb: fdb
+        p.request = types.SimpleNamespace(form={"ip": "", "mac": bad, "note": ""})
+        p.mark_known(1)
+        check(
+            fdb.log == [], f"mark_known: {bad!r} is not a MAC (the old check accepted any 17 characters of [0-9a-f:])"
+        )
+    fdb = FakeDB()
+    p._get_db = lambda: fdb
+    p.request = types.SimpleNamespace(form={"ip": "", "mac": "AA:BB:CC:DD:EE:FF", "note": ""})
+    p.mark_known(1)
+    check(
+        any(sql.startswith("INSERT INTO nd_known_hosts") and prm[0] == "aa:bb:cc:dd:ee:ff" for sql, prm in fdb.log),
+        "mark_known: an upper-case MAC is accepted and stored lower-case",
+    )
+    p.current_user.role, p.current_user.all_subnets = "superadmin", True
+
+    # ── 1.2.2: search looks at the latest completed scan only ────────────────
+    fdb = FakeDB()
+    p._get_db = lambda: fdb
+    p._discovery_search("a_b%", {1}, True)
+    sql, prm = fdb.log[0]
+    check("j2.status = 'done'" in sql and "LIMIT 1" in sql, "search: restricted to each subnet's latest completed scan")
+    check(prm[0] == "%a\\_b\\%%", f"search: % and _ are literal (got {prm[0]!r})")
 
     # ── register(): runs end to end against a stub that enforces Jen's rules ──
     calls = _stub_jen_plugin_api()

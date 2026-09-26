@@ -1,5 +1,57 @@
 # Network Discovery Plugin — Changelog
 
+## [1.2.2] - 2026-09-26
+
+Requires Jen 5.57.0 or later, unchanged. This is the first deep audit of the plugin, and the recurring
+pattern of this round, a route that authorises on one thing and then acts on another, is in it once: the
+known-hosts list.
+
+### Changed: the known-hosts list belongs to administrators who can see every subnet
+
+Marking a host known writes a row to a list that has no subnet column: it applies to that MAC or address on
+every subnet Discovery scans. The route decided access on the one subnet in the URL, so an administrator
+scoped to subnet A could mark a host known and stop the rogue-device alert for subnet B, or forget one and
+start it. The known list is now handled as what it is, an all-subnets object, the way IPAM's unmanaged
+subnets are: only an administrator who can see every subnet may mark or forget a host. Everyone else no longer
+sees the Known and Forget buttons and is refused if the request is made anyway. If you rely on a scoped
+administrator marking hosts known, that has to be done by an unrestricted administrator from now on; nothing
+already on the list changes.
+
+### Fixed: a failed scan could cost the last good scan
+
+The plugin keeps the newest three scans of a subnet and pruned by start time whatever their outcome. A run that
+staged its prune and then failed (a hostname over the column's length was one way) committed the deletes together
+with its "error" status, because recording the status commits the same connection; the last good scan could go,
+and the next scan then had no baseline, so `new_unknowns` counted every unknown host as new and the subnet
+alerted for all of them at once. Pruning now always keeps the newest completed scan, never touches a job that is
+still queued or running, and a run that fails rolls back what it had staged before it records the error.
+
+### Fixed: the results page listed every host as gone after a failed scan
+
+The results page took the latest scan of any status. For a failed, queued or running one there are no rows, so
+the table was empty and "what changed" listed every host of the previous scan as gone. It now shows the latest
+completed scan and a banner naming the newer scan that failed or is in progress.
+
+### Fixed: smaller findings from the same audit
+
+- A queued scan was expired after thirty minutes even while its thread was still waiting for the scan lock, which
+  is longer than three /20 scans ahead of it take; the duplicate check then queued a second scan of the same
+  subnet. A queued job is now expired only when its thread is gone, so after a Jen restart a leftover still clears.
+- The global search joined every kept scan, so a host that had moved or gone was still found, once per scan that
+  saw it. It searches each subnet's latest completed scan only, and treats `%` and `_` in the query literally.
+- The MAC accepted when marking a host known was any seventeen characters of `0-9a-f:`. It has to be a MAC now.
+- A hostname longer than the column (255 characters, a long reverse-DNS name) failed the insert and errored the
+  whole scan. It is cut to fit.
+- The subnet id in the Discovery page's polling script is written with `|tojson`.
+
+### Changed
+
+- `tools/test_plugin.py` runs a scan against a fake database (truncation, the rollback before the error status),
+  simulates the failure sequences against the pruning rule, checks the expiry with a live and a dead thread, renders
+  the results page's data for a failed newest scan, and runs the known-hosts route for scoped, unrestricted and
+  viewer accounts with good and bad MACs.
+- `tools/verify.py` fails a template that has a POST form with no `csrf_token`, the check Jen's own tests make.
+
 ## [1.2.1] - 2026-09-26
 
 Requires Jen 5.57.0 or later, unchanged. No behaviour change.

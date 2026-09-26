@@ -122,11 +122,11 @@
     </div>
     <script nonce="{{ csp_nonce }}">
     (function() {
-        var dots = document.getElementById('dots-{{ subnet_id }}');
+        var dots = document.getElementById('dots-' + {{ subnet_id|tojson }});
         var i = 0;
         var t = setInterval(function() {
             dots.textContent = '.'.repeat(++i % 4 || 1);
-            fetch('/network/discovery/api/scan-status/{{ subnet_id }}')
+            fetch('/network/discovery/api/scan-status/' + {{ subnet_id|tojson }})
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
                     if (d.status === 'done' || d.status === 'error') {

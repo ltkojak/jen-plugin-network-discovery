@@ -55,6 +55,12 @@
 
 {% if job.status == 'error' %}
 <div class="alert alert-danger">✗ The last scan failed: {{ job.error or 'see the Jen log' }}</div>
+{% elif newer_job %}
+{% if newer_job.status == 'error' %}
+<div class="alert alert-danger">✗ The most recent scan failed ({{ newer_job.error or 'see the Jen log' }}). These are the results of the last scan that completed.</div>
+{% else %}
+<div class="alert alert-info">A scan is {{ 'queued' if newer_job.status == 'queued' else 'in progress' }}. These are the results of the last scan that completed.</div>
+{% endif %}
 {% endif %}
 
 <!-- Summary bar -->
@@ -117,14 +123,14 @@
             <td class="nd-865c33" data-m="hide">{{ h.discovered_at | utcfmt if h.discovered_at else '—' }}</td>
             <td class="nd-86abda" data-m="trailing">
                 <div class="nd-74cac9">
-                {% if h.status == 'unknown' %}
+                {% if h.status == 'unknown' and can_change_known %}
                 <form method="POST" action="{{ url_for('network_discovery.mark_known', subnet_id=subnet_id) }}" class="nd-cccfa4">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="ip" value="{{ h.ip }}"><input type="hidden" name="mac" value="{{ h.mac }}">
                     <input type="text" name="note" maxlength="200" placeholder="note" class="nd-a0c2d8">
                     <button type="submit" class="btn btn-sm btn-secondary" title="Never alert on this again">{{ icon("circle-check") }} Known</button>
                 </form>
-                {% elif h.status == 'known' %}
+                {% elif h.status == 'known' and can_change_known %}
                 <form method="POST" action="{{ url_for('network_discovery.mark_known', subnet_id=subnet_id) }}" class="nd-cccfa4">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="ip" value="{{ h.ip }}"><input type="hidden" name="mac" value="{{ h.mac }}"><input type="hidden" name="action" value="forget">

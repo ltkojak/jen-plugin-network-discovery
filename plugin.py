@@ -49,6 +49,7 @@ import io
 import ipaddress
 import logging
 import os as _os
+import re
 import shutil
 import subprocess
 import threading
@@ -71,8 +72,18 @@ bp = Blueprint(
 
 _scan_lock = threading.Lock()
 
-# How many scan jobs (and their results) to keep per subnet, newest first.
+# How many scan jobs (and their results) to keep per subnet, newest first. The newest COMPLETED scan
+# is kept whatever its age (see jobs_to_prune): it is the baseline the next scan's "new unknown" alert
+# and the results page's "what changed" both compare against.
 _KEEP_JOBS = 3
+
+_MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
+
+# Job ids whose scan is queued or running in THIS process. A queued job's thread may wait a long time
+# behind other scans for _scan_lock (three /20 scans in front of it is more than the stale window), and a
+# row that is only waiting must not be expired: the duplicate check would then queue a second scan of the
+# same subnet. After a Jen restart the set is empty, so a leftover row still expires.
+_live_jobs = set()
 
 # A job still 'running' after this long is a leftover from a Jen restart
 # (the scan thread died with the process) — nothing will ever finish it.
@@ -190,6 +201,14 @@ def _require_write():
         return True
     flash("Viewers can look at Discovery but not scan or mark hosts.", "error")
     return False
+
+
+def _can_change_known():
+    """The known-hosts list decides which hosts count as unknown and so alert, and it has no subnet
+    column: a mark or a forget applies to that MAC or IP on EVERY subnet. Authorising it on the one
+    subnet in the URL let an admin scoped to subnet A silence, or re-arm, the alert for subnet B's
+    hosts. It is an all-subnets object, like an IPAM unmanaged subnet: an admin who can see every subnet."""
+    return _is_admin() and bool(getattr(current_user, "all_subnets", False))
 
 
 def _nmap_available():
@@ -630,6 +649,23 @@ def _previous_results(cur, subnet_id, current_job_id):
     return rows
 
 
+def jobs_to_prune(others, keep):
+    """Pure: the ids of a subnet's OLD jobs to delete. `others` is every job of the subnet except the one
+    running now, newest first, as [{"id", "status"}]. The running job is one of the `keep`; the newest
+    `keep - 1` others stay, and so does the newest one that is `done`, always.
+
+    1.2.1 kept the newest N by start time whatever their status. Two failed scans in a row (one /20
+    timing out twice) pushed the last good scan out of the window; the next good scan then found no
+    baseline, `new_unknowns(..., None)` called every unknown host new, and the whole subnet alerted at
+    once. A job that is still queued or running is never pruned: its thread will write to the row."""
+    kept = {j["id"] for j in others[: max(keep - 1, 0)]}
+    for j in others:
+        if j["status"] == "done":
+            kept.add(j["id"])
+            break
+    return [j["id"] for j in others if j["id"] not in kept and j["status"] in ("done", "error")]
+
+
 def _mark_job(db, job_id, status, error=None, hosts=0, unknown=0):
     with db.cursor() as cur:
         cur.execute(
@@ -689,13 +725,13 @@ def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
             prev_keys = None if previous is None else {host_key(r) for r in previous if r["status"] == "unknown"}
             fresh = new_unknowns(hosts, prev_keys)
 
-            # Prune this subnet's history down to the newest _KEEP_JOBS
-            # jobs (this one included) — one fixed statement per old job.
+            # Prune this subnet's history down to the newest _KEEP_JOBS jobs (this one
+            # included) and the newest completed scan (jobs_to_prune) — one fixed statement per old job.
             cur.execute(
-                "SELECT id FROM nd_scan_jobs WHERE subnet_id=%s AND id != %s ORDER BY started_at DESC, id DESC",
+                "SELECT id, status FROM nd_scan_jobs WHERE subnet_id=%s AND id != %s ORDER BY started_at DESC, id DESC",
                 (subnet_id, job_id),
             )
-            for old_id in [r["id"] for r in cur.fetchall()][_KEEP_JOBS - 1 :]:
+            for old_id in jobs_to_prune(cur.fetchall(), _KEEP_JOBS):
                 cur.execute("DELETE FROM nd_scan_results WHERE job_id=%s", (old_id,))
                 cur.execute("DELETE FROM nd_scan_jobs WHERE id=%s", (old_id,))
             for h in hosts:
@@ -708,7 +744,9 @@ def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
                         job_id,
                         h["ip"],
                         h.get("mac", ""),
-                        h.get("hostname", ""),
+                        (h.get("hostname") or "")[
+                            :255
+                        ],  # VARCHAR(255): a longer rDNS name failed the INSERT and errored the scan
                         h["in_kea"],
                         h["rogue"],
                         h["status"],
@@ -727,6 +765,12 @@ def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
     except Exception as e:
         logger.error(f"Network Discovery scan error: {e}")
         if job_id is not None:
+            # 1.2.2: undo whatever this run had staged first. _mark_job commits the SAME connection, so
+            # the prune's deletes (and any half-written result rows) used to be committed along with the
+            # "error" status: a run that failed after pruning could delete the last good scan and leave
+            # an error job with partial results.
+            with contextlib.suppress(Exception):
+                db.rollback()
             with contextlib.suppress(Exception):
                 _mark_job(db, job_id, "error", "scan failed — see the Jen log")
     finally:
@@ -809,20 +853,42 @@ def _expire_stale_running_jobs(cur):
     index shows it as 'Scanning…' forever and the poller never stops.
     v1.1.2 — covers 'queued' rows too: a job Jen queued but never got to
     start (Jen restarted before it reached the front of _scan_lock) would
-    otherwise show "Queued" forever the same way."""
+    otherwise show "Queued" forever the same way.
+
+    1.2.2 — a queued job is expired only when its thread is gone. The age is measured from the moment it
+    was queued, and with several scans ahead of it on the lock a healthy queued job can be older than the
+    window; expiring it made the duplicate check (queued+running) see nothing pending, so the next click
+    queued a second scan of the same subnet. `_live_jobs` names the jobs whose thread is alive in this
+    process; after a restart it is empty and the leftover expires as before."""
     cur.execute(
         "UPDATE nd_scan_jobs SET status='error', error='interrupted (Jen restarted mid-scan)', finished_at=NOW() "
-        "WHERE status IN ('running', 'queued') AND started_at < NOW() - INTERVAL %s MINUTE",
+        "WHERE status='running' AND started_at < NOW() - INTERVAL %s MINUTE",
         (_STALE_RUNNING_MINUTES,),
     )
+    cur.execute(
+        "SELECT id FROM nd_scan_jobs WHERE status='queued' AND started_at < NOW() - INTERVAL %s MINUTE",
+        (_STALE_RUNNING_MINUTES,),
+    )
+    for row in cur.fetchall():
+        if row["id"] in _live_jobs:
+            continue
+        cur.execute(
+            "UPDATE nd_scan_jobs SET status='error', error='interrupted (Jen restarted mid-scan)', finished_at=NOW() "
+            "WHERE id=%s AND status='queued'",
+            (row["id"],),
+        )
 
 
 def _start_scan(subnet_id, cidr, trigger="manual"):
     job_id = _queue_scan_job(subnet_id)
+    _live_jobs.add(job_id)
 
     def _bg():
-        with _scan_lock:
-            _run_scan_job(subnet_id, cidr, job_id, trigger)
+        try:
+            with _scan_lock:
+                _run_scan_job(subnet_id, cidr, job_id, trigger)
+        finally:
+            _live_jobs.discard(job_id)
 
     threading.Thread(target=_bg, daemon=True).start()
 
@@ -899,8 +965,12 @@ def _scheduled_tick():
             continue
         logger.info(f"Network Discovery: scheduled scan of {info['name']} ({info['cidr']})")
         job_id = _queue_scan_job(sid)
-        with _scan_lock:
-            _run_scan_job(sid, info["cidr"], job_id, trigger="scheduled")
+        _live_jobs.add(job_id)
+        try:
+            with _scan_lock:
+                _run_scan_job(sid, info["cidr"], job_id, trigger="scheduled")
+        finally:
+            _live_jobs.discard(job_id)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -1088,6 +1158,7 @@ def results(subnet_id):
         return redirect(url_for("network_discovery.index"))
 
     job = None
+    latest_job = None
     hosts = []
     appeared, gone = [], []
     db = None
@@ -1102,7 +1173,21 @@ def results(subnet_id):
                 """,
                 (subnet_id,),
             )
-            job = cur.fetchone()
+            latest_job = cur.fetchone()
+            job = latest_job
+            if latest_job and latest_job["status"] != "done":
+                # 1.2.2: the page shows the latest COMPLETED scan and a banner about the newer one. It used
+                # to take the latest job of any status: for a failed or running one there are no rows, so
+                # the table was empty and "what changed" listed every host of the previous scan as gone.
+                cur.execute(
+                    """
+                    SELECT id, status, started_at, finished_at, hosts_found, rogue_count, error
+                    FROM nd_scan_jobs WHERE subnet_id=%s AND status='done'
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                    """,
+                    (subnet_id,),
+                )
+                job = cur.fetchone() or latest_job
             if job:
                 hosts = _load_results(cur, job["id"])
                 previous = _previous_results(cur, subnet_id, job["id"])
@@ -1123,6 +1208,8 @@ def results(subnet_id):
         subnet_id=subnet_id,
         subnet=subnet_map.get(subnet_id, {}),
         job=job,
+        newer_job=latest_job if latest_job and job and latest_job["id"] != job["id"] else None,
+        can_change_known=_can_change_known(),
         hosts=hosts,
         counts=counts,
         statuses=_STATUSES,
@@ -1206,6 +1293,12 @@ def mark_known(subnet_id):
 
     if not assert_subnet_access(subnet_id):
         return redirect(url_for("network_discovery.index"))
+    if not _can_change_known():
+        flash(
+            "Only an administrator with access to every subnet can change the known-hosts list: it applies to every subnet.",
+            "error",
+        )
+        return redirect(url_for("network_discovery.results", subnet_id=subnet_id))
     back = redirect(url_for("network_discovery.results", subnet_id=subnet_id))
     ip = request.form.get("ip", "").strip()
     mac = request.form.get("mac", "").strip().lower()
@@ -1217,7 +1310,7 @@ def mark_known(subnet_id):
     except ValueError:
         flash("Invalid IP address.", "error")
         return back
-    if mac and not (len(mac) == 17 and all(c in "0123456789abcdef:" for c in mac)):
+    if mac and not _MAC_RE.match(mac):
         flash("Invalid MAC address.", "error")
         return back
     if not mac and not ip:
@@ -1330,18 +1423,26 @@ def _discovery_search(query, accessible_subnet_ids, all_subnets):
     q = (query or "").strip()
     if not q:
         return []
-    like = f"%{q}%"
+    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
     out = []
     db = None
     try:
         db = _get_db()
         with db.cursor() as cur:
+            # 1.2.2: only each subnet's LATEST completed scan. The plugin keeps a few scans per subnet, and
+            # the join used to search all of them, so a host that has since gone (or changed IP) was still
+            # found, once per scan that saw it.
             cur.execute(
                 """
                 SELECT r.ip, r.mac, r.hostname, r.label, r.vendor, r.discovered_at, j.subnet_id
                 FROM nd_scan_results r
                 JOIN nd_scan_jobs j ON j.id = r.job_id
                 WHERE j.status = 'done'
+                  AND j.id = (
+                      SELECT j2.id FROM nd_scan_jobs j2
+                      WHERE j2.subnet_id = j.subnet_id AND j2.status = 'done'
+                      ORDER BY j2.started_at DESC, j2.id DESC LIMIT 1
+                  )
                   AND (r.mac LIKE %s OR r.ip LIKE %s OR r.hostname LIKE %s OR r.label LIKE %s OR r.vendor LIKE %s)
                 ORDER BY r.discovered_at DESC LIMIT 20
                 """,
