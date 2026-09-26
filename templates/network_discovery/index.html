@@ -39,6 +39,10 @@
 .nd-f6ebab{font-size:11px;color:var(--text)}
 .nd-f90a4f{font-size:11px;color:var(--primary)}
 .nd-fc84e9{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
+.nd-num22{font-size:22px;font-weight:700}
+.nd-c-warn{color:var(--warning)}
+.nd-c-ok{color:var(--success)}
+.nd-c-muted{color:var(--text-muted)}
 </style>
 
 {% if ipv6_enabled %}
@@ -102,7 +106,7 @@
             <div class="nd-749148">Hosts found</div>
         </div>
         <div class="nd-91a870">
-            <div style="font-size:22px;font-weight:700;{% if last.rogue_count > 0 %}color:var(--warning){% else %}color:var(--success){% endif %};">{{ last.rogue_count }}</div>
+            <div class="nd-num22 {{ 'nd-c-warn' if last.rogue_count > 0 else 'nd-c-ok' }}">{{ last.rogue_count }}</div>
             <div class="nd-749148">Unknown</div>
         </div>
         <div class="nd-91a870">

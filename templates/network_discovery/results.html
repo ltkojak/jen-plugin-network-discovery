@@ -41,6 +41,10 @@
 .nd-cccfa4{display:inline}
 .nd-dc2e42{color:var(--primary)}
 .nd-deed7d{margin-top:12px;font-size:12px;color:var(--text-muted)}
+.nd-num28{font-size:28px;font-weight:700}
+.nd-c-warn{color:var(--warning)}
+.nd-c-ok{color:var(--success)}
+.nd-c-muted{color:var(--text-muted)}
 </style>
 
 {% if not job %}
@@ -63,7 +67,7 @@
         {% for s in statuses %}
         {% if counts[s] %}
         <div>
-            <div style="font-size:28px;font-weight:700;{% if s == 'unknown' %}color:var(--warning){% elif s in ('lease','reservation') %}color:var(--success){% else %}color:var(--text-muted){% endif %};">{{ counts[s] }}</div>
+            <div class="nd-num28 {{ 'nd-c-warn' if s == 'unknown' else ('nd-c-ok' if s in ('lease','reservation') else 'nd-c-muted') }}">{{ counts[s] }}</div>
             <div class="nd-865c33">{{ icon(status_icons[s]) }} {{ status_labels[s] }}</div>
         </div>
         {% endif %}

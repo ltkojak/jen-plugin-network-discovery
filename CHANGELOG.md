@@ -1,5 +1,14 @@
 # Network Discovery Plugin — Changelog
 
+## [1.2.1] - 2026-09-26
+
+Requires Jen 5.57.0 or later, unchanged. No behaviour change.
+
+### Changed
+
+- The two statistics tiles (the last scan's rogue count, and the results page's per-status counts) carried a style attribute each, because their colour depends on the value. The colour is now a class chosen by the same condition, so no template carries an inline `style=` attribute, and `tools/verify.py` now fails one that does (the round-4 UI rule, already enforced in the other bundled plugins).
+- This plugin already logged database and scan failures and showed a generic message, so it needed no change for the error-text rule Jen now tests in every bundled plugin.
+
 ## [1.2.0] - 2026-09-23
 
 ### Sprite icons, a rowlist results table, a Timeline event per new unknown, and a search provider — built on Jen's plugin API v3
