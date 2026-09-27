@@ -49,7 +49,6 @@ import io
 import ipaddress
 import logging
 import os as _os
-import re
 import shutil
 import subprocess
 import threading
@@ -77,7 +76,6 @@ _scan_lock = threading.Lock()
 # and the results page's "what changed" both compare against.
 _KEEP_JOBS = 3
 
-_MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 
 # Job ids whose scan is queued or running in THIS process. A queued job's thread may wait a long time
 # behind other scans for _scan_lock (three /20 scans in front of it is more than the stale window), and a
@@ -511,6 +509,32 @@ def _load_devices(macs):
     return out
 
 
+def apply_known(rows, known):
+    """Pure: re-derive 'known' vs 'unknown' on already-scanned rows from the CURRENT known-hosts list.
+
+    v1.2.3 (Q100 a) — marking (or forgetting) a host used to UPDATE the one subnet's latest DONE job's
+    stored rows; the known list has no subnet (`_can_change_known` already requires an administrator
+    who sees every subnet to change it), so a host marked known from subnet A stayed 'unknown'/rogue on
+    subnet B's results, index card, export and search until B happened to be rescanned. Every reader of
+    scanned rows now re-derives 'known'/'unknown' from the list as it stands right now instead of trusting
+    what a past scan (or a past mark_known UPDATE) wrote; every other status (a lease, a reservation, an
+    infrastructure address, an IPAM entry, a device) is untouched, since the known list has no say over
+    those. `known` is `_load_known()`'s own `{(mac, ip): note}` shape — a MAC-keyed host is looked up by
+    MAC alone (mac takes precedence over ip, the same rule `mark_known` itself applies when saving)."""
+    out = []
+    for row in rows:
+        row = dict(row)
+        if row.get("status") in ("known", "unknown"):
+            key = (row.get("mac") or "", "") if row.get("mac") else ("", row.get("ip") or "")
+            note = known.get(key)
+            if note is not None:
+                row["status"], row["rogue"], row["label"] = "known", False, (note or row.get("label") or "")
+            else:
+                row["status"], row["rogue"] = "unknown", True
+        out.append(row)
+    return out
+
+
 def _load_known():
     """{(mac or '', ip or ''): note} — the operator's "I know this one" list."""
     out = {}
@@ -675,24 +699,36 @@ def _mark_job(db, job_id, status, error=None, hosts=0, unknown=0):
     db.commit()
 
 
-def _queue_scan_job(subnet_id):
-    """v1.1.2 — INSERT the job row as 'queued' before the scan thread is
-    even spawned, let alone before it acquires _scan_lock. Previously the
-    row only appeared once _run_scan_job() itself ran (inside the lock),
-    so a second click on a DIFFERENT subnet while one scan held the lock
-    saw no row for it yet and queued a duplicate thread; both would run
-    back to back once the lock freed up. Now every caller — the route and
-    the scheduler — reserves the row first, and the duplicate check
-    (queued+running) sees it immediately."""
-    db = _get_db()
-    try:
-        with db.cursor() as cur:
-            cur.execute("INSERT INTO nd_scan_jobs (subnet_id, status) VALUES (%s, 'queued')", (subnet_id,))
-            job_id = cur.lastrowid
-        db.commit()
-        return job_id
-    finally:
-        db.close()
+_queue_lock = threading.Lock()
+
+
+def _reserve_scan(subnet_id):
+    """Reserve a scan job for `subnet_id`, or None when one is already queued or running.
+
+    v1.2.3 (Q100 b) — `start_scan` and `_scheduled_tick` each did their OWN check-then-insert (a SELECT
+    for a pending job, then, seeing none, an unconditional INSERT), with no lock around the pair —
+    only `_scan_lock` wraps the RUN. A click racing the scheduler's own read (or two clicks close
+    together) could both see 'nothing pending' and both insert a job, running two scans of the same
+    subnet back to back. Both callers now go through this one function, serialised in-process by
+    `_queue_lock`; the INSERT itself is also conditioned on no queued/running row existing for the
+    subnet (`WHERE NOT EXISTS`), so it stays correct even without the lock, which only protects the
+    in-process double-click case the lock is really for."""
+    with _queue_lock:
+        db = _get_db()
+        try:
+            with db.cursor() as cur:
+                _expire_stale_running_jobs(cur)
+                cur.execute(
+                    "INSERT INTO nd_scan_jobs (subnet_id, status) "
+                    "SELECT %s, 'queued' FROM DUAL WHERE NOT EXISTS ("
+                    "SELECT 1 FROM nd_scan_jobs WHERE subnet_id=%s AND status IN ('queued', 'running'))",
+                    (subnet_id, subnet_id),
+                )
+                job_id = cur.lastrowid if cur.rowcount else None
+            db.commit()
+            return job_id
+        finally:
+            db.close()
 
 
 def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
@@ -879,8 +915,8 @@ def _expire_stale_running_jobs(cur):
         )
 
 
-def _start_scan(subnet_id, cidr, trigger="manual"):
-    job_id = _queue_scan_job(subnet_id)
+def _start_scan_thread(subnet_id, cidr, job_id, trigger="manual"):
+    """Run an ALREADY-RESERVED job (`_reserve_scan`) in a background thread."""
     _live_jobs.add(job_id)
 
     def _bg():
@@ -963,8 +999,10 @@ def _scheduled_tick():
         info = subnet_map.get(sid)
         if not info or scan_scope_error(info["cidr"]):
             continue
+        job_id = _reserve_scan(sid)
+        if job_id is None:  # already queued or running (a click raced this tick)
+            continue
         logger.info(f"Network Discovery: scheduled scan of {info['name']} ({info['cidr']})")
-        job_id = _queue_scan_job(sid)
         _live_jobs.add(job_id)
         try:
             with _scan_lock:
@@ -987,6 +1025,7 @@ def index():
         db = _get_db()
         with db.cursor() as cur:
             _expire_stale_running_jobs(cur)
+            known = _load_known()
             for sid in subnet_map:
                 cur.execute(
                     """
@@ -997,6 +1036,13 @@ def index():
                     (sid,),
                 )
                 row = cur.fetchone()
+                if row and row["status"] == "done":
+                    # v1.2.3 (Q100 a) — the stored rogue_count is a snapshot from scan time; a mark/forget
+                    # elsewhere no longer updates it, so the card recomputes it live from the current list.
+                    rows = apply_known(_load_results(cur, row["id"]), known)
+                    row = dict(row)
+                    row["hosts_found"] = len(rows)
+                    row["rogue_count"] = sum(1 for r in rows if r["status"] == "unknown")
                 scan_summary[sid] = row or {}
         db.commit()
     except Exception as e:
@@ -1048,32 +1094,15 @@ def start_scan(subnet_id):
         flash(scope, "error")
         return redirect(url_for("network_discovery.index"))
 
-    # Refuse a second scan of a subnet that's genuinely mid-scan (or
-    # queued behind another subnet's scan — v1.1.2); a job that only
-    # *looks* mid-scan because Jen restarted under it gets expired first
-    # so it can't block the subnet forever.
-    db = None
-    try:
-        db = _get_db()
-        with db.cursor() as cur:
-            _expire_stale_running_jobs(cur)
-            cur.execute(
-                "SELECT id FROM nd_scan_jobs WHERE subnet_id=%s AND status IN ('queued', 'running') LIMIT 1",
-                (subnet_id,),
-            )
-            pending = cur.fetchone()
-        db.commit()
-    except Exception as e:
-        logger.error(f"Network Discovery: could not check for a running scan: {e}")
-        pending = None
-    finally:
-        if db:
-            db.close()
-    if pending:
+    # v1.2.3 (Q100 b) — reserve-and-check is now ONE atomic step, shared with the scheduler
+    # (_reserve_scan); a job that only *looks* mid-scan because Jen restarted under it is expired
+    # first, inside that same function, so it can't block the subnet forever.
+    job_id = _reserve_scan(subnet_id)
+    if job_id is None:
         flash(f"A scan of {subnet_map[subnet_id]['name']} is already in progress.", "warning")
         return redirect(url_for("network_discovery.index"))
 
-    _start_scan(subnet_id, cidr)
+    _start_scan_thread(subnet_id, cidr, job_id)
     flash(f"Scan started for {subnet_map[subnet_id]['name']}. Results will appear in a moment.", "success")
     return redirect(url_for("network_discovery.index"))
 
@@ -1126,7 +1155,7 @@ def set_schedule(subnet_id):
     return redirect(url_for("network_discovery.index"))
 
 
-def _load_results(cur, job_id):
+def _load_results(cur, job_id, known=None):
     cur.execute(
         """
         SELECT ip, mac, hostname, in_kea, rogue, status, label, vendor, device_type, discovered_at
@@ -1141,6 +1170,11 @@ def _load_results(cur, job_id):
         r["status"] = r.get("status") or ("unknown" if r.get("rogue") else "lease")
         r["label"] = r.get("label") or ""
         r["vendor"] = r.get("vendor") or ""
+    # v1.2.3 (Q100 a) — every reader of stored results re-derives known/unknown live; `known=None` keeps
+    # the raw scanned status for a caller that doesn't need it (none do any more, but the parameter stays
+    # optional so a future caller is not forced to pay for a known-hosts read it has no use for).
+    if known is not None:
+        rows = apply_known(rows, known)
     return rows
 
 
@@ -1189,7 +1223,7 @@ def results(subnet_id):
                 )
                 job = cur.fetchone() or latest_job
             if job:
-                hosts = _load_results(cur, job["id"])
+                hosts = _load_results(cur, job["id"], known=_load_known())
                 previous = _previous_results(cur, subnet_id, job["id"])
                 if previous is not None:
                     appeared, gone = delta(hosts, previous)
@@ -1248,7 +1282,7 @@ def export_results(subnet_id):
             )
             job = cur.fetchone()
             if job:
-                rows = _load_results(cur, job["id"])
+                rows = _load_results(cur, job["id"], known=_load_known())
     except Exception as e:
         logger.error(f"Network Discovery export error: {e}")
     finally:
@@ -1310,7 +1344,9 @@ def mark_known(subnet_id):
     except ValueError:
         flash("Invalid IP address.", "error")
         return back
-    if mac and not _MAC_RE.match(mac):
+    from jen.plugin_api import normalize_mac
+
+    if mac and not normalize_mac(mac):
         flash("Invalid MAC address.", "error")
         return back
     if not mac and not ip:
@@ -1329,29 +1365,9 @@ def mark_known(subnet_id):
                     "ON DUPLICATE KEY UPDATE note=VALUES(note), added_by=VALUES(added_by)",
                     (key_mac, key_ip, note, current_user.username),
                 )
-            # Reflect it in the latest results right away rather than
-            # waiting for the next scan.
-            cur.execute(
-                "SELECT id FROM nd_scan_jobs WHERE subnet_id=%s AND status='done' ORDER BY started_at DESC, id DESC LIMIT 1",
-                (subnet_id,),
-            )
-            job = cur.fetchone()
-            if job:
-                new_status = "unknown" if action == "forget" else "known"
-                if key_mac:
-                    cur.execute(
-                        "UPDATE nd_scan_results SET status=%s, rogue=%s, label=%s WHERE job_id=%s AND mac=%s AND status IN ('unknown','known')",
-                        (new_status, new_status == "unknown", note, job["id"], key_mac),
-                    )
-                else:
-                    cur.execute(
-                        "UPDATE nd_scan_results SET status=%s, rogue=%s, label=%s WHERE job_id=%s AND ip=%s AND status IN ('unknown','known')",
-                        (new_status, new_status == "unknown", note, job["id"], key_ip),
-                    )
-                cur.execute(
-                    "UPDATE nd_scan_jobs SET rogue_count=(SELECT COUNT(*) FROM nd_scan_results WHERE job_id=%s AND status='unknown') WHERE id=%s",
-                    (job["id"], job["id"]),
-                )
+            # v1.2.3 (Q100 a) — nothing left to reflect into a stored job: every reader re-derives
+            # known/unknown from this table live (apply_known), so the change is visible everywhere,
+            # on every subnet, the moment this commits — not just the one job this used to UPDATE.
         db.commit()
         what = mac or ip
         flash(
@@ -1377,10 +1393,11 @@ def mark_known(subnet_id):
 @login_required
 def api_scan_status(subnet_id):
     """Poll endpoint for scan progress."""
-    from jen.plugin_api import assert_subnet_access
+    from jen.plugin_api import subnet_or_404
 
-    if not assert_subnet_access(subnet_id):
-        return jsonify({"error": "Access denied"}), 403
+    _subnet, refused = subnet_or_404(subnet_id)
+    if refused:
+        return refused
     db = None
     try:
         db = _get_db()
@@ -1423,7 +1440,17 @@ def _discovery_search(query, accessible_subnet_ids, all_subnets):
     q = (query or "").strip()
     if not q:
         return []
-    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    from jen.plugin_api import like_pattern, search_scope
+
+    # v1.2.3 (Q100) — the caller's own subnet scope is now IN the query, before its own LIMIT 20: it
+    # used to take the newest 20 matches across every subnet and rely on Jen's own re-filter to drop the
+    # ones the caller cannot see, so a restricted caller whose only match came after 20 matches from a
+    # subnet they cannot see got nothing.
+    scope = search_scope(accessible_subnet_ids, all_subnets, "j.subnet_id")
+    if scope is None:
+        return []
+    scope_clause, scope_params = scope
+    like = like_pattern(q)
     out = []
     db = None
     try:
@@ -1433,11 +1460,11 @@ def _discovery_search(query, accessible_subnet_ids, all_subnets):
             # the join used to search all of them, so a host that has since gone (or changed IP) was still
             # found, once per scan that saw it.
             cur.execute(
-                """
+                f"""
                 SELECT r.ip, r.mac, r.hostname, r.label, r.vendor, r.discovered_at, j.subnet_id
                 FROM nd_scan_results r
                 JOIN nd_scan_jobs j ON j.id = r.job_id
-                WHERE j.status = 'done'
+                WHERE j.status = 'done' AND {scope_clause}
                   AND j.id = (
                       SELECT j2.id FROM nd_scan_jobs j2
                       WHERE j2.subnet_id = j.subnet_id AND j2.status = 'done'
@@ -1445,8 +1472,8 @@ def _discovery_search(query, accessible_subnet_ids, all_subnets):
                   )
                   AND (r.mac LIKE %s OR r.ip LIKE %s OR r.hostname LIKE %s OR r.label LIKE %s OR r.vendor LIKE %s)
                 ORDER BY r.discovered_at DESC LIMIT 20
-                """,
-                (like, like, like, like, like),
+                """,  # nosec B608 - scope_clause is search_scope()'s own %s placeholders, values bound below
+                (*scope_params, like, like, like, like, like),
             )
             for row in cur.fetchall():
                 bits = [row["ip"]]

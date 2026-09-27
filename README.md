@@ -6,7 +6,7 @@ Scan your subnets and account for every device on them. Finds every live host on
 
 ## Requirements
 
-- [Jen](https://github.com/ltkojak/jen-kea) v5.57.0 or later (v1.1.x runs on 5.34.0+)
+- [Jen](https://github.com/ltkojak/jen-kea) v5.65.10 or later (v1.1.x runs on 5.34.0+)
 - `nmap` on the Jen host — Settings → Plugins offers an **Install nmap** button on a systemd host (through Jen's root-run plugin service); elsewhere:
   ```bash
   sudo apt install nmap

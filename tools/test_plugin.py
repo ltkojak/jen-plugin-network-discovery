@@ -57,7 +57,7 @@ def _stub_jen_plugin_api():
     harness predates that lesson. Note register() here wraps register_periodic in a try/except, so a
     violation would be SWALLOWED and the scheduled scans silently absent — hence the check below
     that the call actually landed. Returns the registered calls."""
-    calls = {"alert_types": [], "periodic": [], "search": []}
+    calls = {"alert_types": [], "periodic": [], "search": [], "subnets": {1, 2, 9}}
 
     def register_alert_type(plugin_id, type_id, **kwargs):
         prefix = f"{plugin_id}_"
@@ -76,6 +76,41 @@ def _stub_jen_plugin_api():
     plugin_api.register_periodic = register_periodic
     plugin_api.register_search_provider = lambda *a, **k: calls["search"].append(a)
     plugin_api.assert_subnet_access = lambda subnet_id: True
+
+    def normalize_mac(raw):
+        import re as _re
+
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        cleaned = _re.sub(r"[^0-9a-fA-F]", "", raw).lower()
+        if len(cleaned) != 12:
+            return None
+        mac = ":".join(cleaned[i : i + 2] for i in range(0, 12, 2))
+        return mac if _re.match(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", mac) else None
+
+    def like_pattern(text):
+        return "%" + str(text).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+    def in_placeholders(values):
+        n = len(list(values))
+        return ",".join(["%s"] * n) if n else "NULL"
+
+    def search_scope(accessible_ids, all_subnets, column):
+        if all_subnets:
+            return "1=1", []
+        ids = sorted({int(i) for i in (accessible_ids or [])})
+        if not ids:
+            return None
+        return f"{column} IN ({in_placeholders(ids)})", ids
+
+    def subnet_or_404(subnet_id):
+        return ({"name": "n"}, None) if subnet_id in calls["subnets"] else (None, ({"error": "not found"}, 404))
+
+    plugin_api.normalize_mac = normalize_mac
+    plugin_api.like_pattern = like_pattern
+    plugin_api.in_placeholders = in_placeholders
+    plugin_api.search_scope = search_scope
+    plugin_api.subnet_or_404 = subnet_or_404
     jen_pkg.plugin_api = plugin_api
     sys.modules["jen"] = jen_pkg
     sys.modules["jen.plugin_api"] = plugin_api
@@ -553,6 +588,125 @@ def main():
     sql, prm = fdb.log[0]
     check("j2.status = 'done'" in sql and "LIMIT 1" in sql, "search: restricted to each subnet's latest completed scan")
     check(prm[0] == "%a\\_b\\%%", f"search: % and _ are literal (got {prm[0]!r})")
+
+    # ── 1.2.3 (Q100): the search provider scopes in SQL, before its own LIMIT ──
+    fdb = FakeDB()
+    p._get_db = lambda: fdb
+    p._discovery_search("printer", {1}, False)
+    sql, prm = fdb.log[0]
+    check(
+        "j.subnet_id IN (%s)" in sql and prm[0] == 1,
+        f"search: a restricted caller's own subnet scope is in the SQL, not applied afterward (got {sql!r}, {prm})",
+    )
+    fdb = FakeDB()
+    p._get_db = lambda: fdb
+    p._discovery_search("printer", set(), False)
+    check(fdb.log == [], "search: a caller who may see nothing runs no query at all")
+
+    # ── 1.2.3 (Q100 a): known/unknown is derived at READ time, everywhere ────
+    known_now = {("aa:aa:aa:aa:aa:01", ""): "printer"}
+    stored_unknown = {"ip": "10.0.0.5", "mac": "aa:aa:aa:aa:aa:01", "status": "unknown", "rogue": True, "label": ""}
+    stored_known_but_forgotten = {
+        "ip": "10.0.0.6",
+        "mac": "aa:aa:aa:aa:aa:02",
+        "status": "known",
+        "rogue": False,
+        "label": "old note",
+    }
+    stored_lease = {"ip": "10.0.0.7", "mac": "", "status": "lease", "rogue": False, "label": ""}
+    out = p.apply_known([dict(stored_unknown), dict(stored_known_but_forgotten), dict(stored_lease)], known_now)
+    check(
+        out[0]["status"] == "known" and out[0]["rogue"] is False and out[0]["label"] == "printer",
+        "apply_known: a host marked known elsewhere reads known here too, without a rescan",
+    )
+    check(
+        out[1]["status"] == "unknown" and out[1]["rogue"] is True,
+        "apply_known: a host forgotten elsewhere reads unknown here too, without a rescan",
+    )
+    check(out[2]["status"] == "lease", "apply_known: a status the known list has no say over is untouched")
+    check(
+        p.apply_known([dict(stored_unknown)], {})[0]["status"] == "unknown",
+        "apply_known: nothing known means every unknown/known row reads unknown",
+    )
+    # an IP-only host (no MAC) is looked up by IP, exactly as mark_known itself stores it
+    ip_only = {"ip": "10.0.0.9", "mac": "", "status": "unknown", "rogue": True, "label": ""}
+    check(
+        p.apply_known([dict(ip_only)], {("", "10.0.0.9"): "kiosk"})[0]["status"] == "known",
+        "apply_known: a MAC-less host is looked up by its IP",
+    )
+
+    # ── 1.2.3 (Q100 b): _reserve_scan is the ONE atomic path for both callers ──
+    class _ReserveDB:
+        """Simulates the database's own WHERE NOT EXISTS: the second reservation for a subnet that
+        already has one pending inserts nothing (rowcount 0)."""
+
+        def __init__(self):
+            self.pending = set()
+            self.log = []
+
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=()):
+            self.log.append((" ".join(sql.split()), params))
+            if sql.strip().startswith("INSERT INTO nd_scan_jobs"):
+                sid = params[0]
+                if sid in self.pending:
+                    self.rowcount = 0
+                else:
+                    self.pending.add(sid)
+                    self.rowcount = 1
+                    self.lastrowid = 99
+
+        def fetchall(self):
+            return []
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    rdb = _ReserveDB()
+    p._get_db = lambda: rdb
+    first = p._reserve_scan(5)
+    second = p._reserve_scan(5)
+    check(
+        first == 99 and second is None,
+        f"_reserve_scan: a second reservation for a pending subnet gets None (got {first}, {second})",
+    )
+    check(p._reserve_scan(6) == 99, "_reserve_scan: a different subnet is unaffected")
+
+    # ── 1.2.3 (Q100 c): the poll route uses subnet_or_404, not the flashing assert_subnet_access ──
+    _stub_jen_plugin_api()
+    p.jsonify = lambda payload: payload
+    p._get_db = lambda: FakeDB(
+        lambda sql, params: {
+            "id": 1,
+            "status": "done",
+            "started_at": None,
+            "finished_at": None,
+            "hosts_found": 1,
+            "rogue_count": 0,
+            "error": None,
+        }
+    )
+    ok_result = p.api_scan_status(1)
+    check(
+        ok_result.get("status") == "done" if isinstance(ok_result, dict) else False,
+        f"api_scan_status: an accessible subnet still answers (got {ok_result})",
+    )
+    refused = p.api_scan_status(999)
+    check(
+        isinstance(refused, tuple) and refused[1] == 404,
+        f"api_scan_status: an inaccessible/unknown subnet is a 404, not a flash (got {refused})",
+    )
 
     # ── register(): runs end to end against a stub that enforces Jen's rules ──
     calls = _stub_jen_plugin_api()

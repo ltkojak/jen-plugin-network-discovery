@@ -1,5 +1,46 @@
 # Network Discovery Plugin — Changelog
 
+## [1.2.3] - 2026-09-27
+
+Jen's Q100 sweep: onto Jen 5.65.10's shared helpers, and the last of the known-hosts fixes from the last
+release.
+
+### Fixed: marking a host known elsewhere left it unknown here until a rescan
+
+The known-hosts list has no subnet (marking or forgetting a host has needed an administrator who can see
+every subnet since 1.2.2, for exactly that reason), but each scan's own results row still carried whatever
+`known`/`unknown` a past scan — or a past mark/forget, which only ever touched the one subnet's latest
+completed job — had written into it. A laptop marked known from subnet A's results page kept reading
+`unknown` (and alerting as a rogue device) on subnet B's results, on the index card, in a CSV export and in
+search, until B happened to be rescanned. Every reader of scanned results now re-derives known/unknown from
+the CURRENT known-hosts list at the moment it reads, not from what a scan (or a stale mark_known write)
+recorded; marking or forgetting a host is visible everywhere the instant it is saved. `mark_known` itself
+is simpler for it — it no longer reaches into a stored job's rows at all.
+
+### Fixed: a click could queue a scan of a subnet already queued
+
+`start_scan` and the scheduler each checked for a pending job and then inserted a new one as two separate
+steps, with nothing holding the pair together; a click racing the scheduler's own check (or two clicks
+close together) could both see nothing pending and both queue a scan, running the same subnet's scan
+twice back to back. Both now go through one `_reserve_scan`, serialised in-process and backed by an INSERT
+that only succeeds when no job is already queued or running for the subnet.
+
+### Fixed: the scan-status poll flashed on a subnet the caller cannot see
+
+The poll endpoint used the same `assert_subnet_access` a page route uses, which queues a flash message —
+one that then surfaced on whatever page the caller next opened, for a route that answers JSON and is
+never itself a page. It answers 404 now, with nothing queued.
+
+### Changed
+
+- The search provider puts the caller's own subnet scope in its SQL, before its own `LIMIT 20`, using
+  Jen's shared `search_scope()`/`like_pattern()`; a restricted caller whose only match came after twenty
+  matches in a subnet they cannot see used to get nothing.
+- The known-hosts MAC check delegates to Jen's shared `normalize_mac()`.
+- `tools/test_plugin.py` checks `apply_known`'s read-time re-derivation directly, that a second
+  reservation of a pending subnet is refused, and that the status poll is a 404 rather than a flash for a
+  subnet the caller cannot see.
+
 ## [1.2.2] - 2026-09-26
 
 Requires Jen 5.57.0 or later, unchanged. This is the first deep audit of the plugin, and the recurring
