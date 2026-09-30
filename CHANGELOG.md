@@ -1,5 +1,18 @@
 # Network Discovery Plugin — Changelog
 
+## [1.2.4] - 2026-09-30
+
+The results page's Create Reservation link sent `subnet=`, a parameter
+name Jen's `add_reservation()` route never read — so the form opened
+with whatever subnet happened to be first in the select, not the
+subnet this scan result was actually found on (Jen 5.66.0-beta.8, Q110,
+closes it Jen-side too: `subnet=` is now accepted as an alias, and the
+route falls back to the address's own CIDR and the MAC's known subnet
+when nothing is passed at all). Fixed at the source: the link now sends
+`subnet_id=`, matching the route's canonical parameter, and every value
+on it — the address, the subnet id, the MAC — is URL-encoded (the
+hostname already was).
+
 ## [1.2.3] - 2026-09-27
 
 Jen's Q100 sweep: onto Jen 5.65.10's shared helpers, and the last of the known-hosts fixes from the last

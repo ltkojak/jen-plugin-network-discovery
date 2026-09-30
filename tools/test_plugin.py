@@ -708,6 +708,30 @@ def main():
         f"api_scan_status: an inaccessible/unknown subnet is a 404, not a flash (got {refused})",
     )
 
+    # ── 1.2.4: the Create Reservation link carries subnet_id=, not subnet= ──
+    # Jen's own add_reservation() route only ever reads subnet_id (subnet= is
+    # accepted as an alias, but the canonical name is what every link should
+    # send). render_template is stubbed above to return its own kwargs rather
+    # than real HTML, so this reads the template SOURCE directly instead.
+    with open(os.path.join(ROOT, "templates", "network_discovery", "results.html"), encoding="utf-8") as f:
+        results_html = f.read()
+    reservation_line = next(
+        (line for line in results_html.splitlines() if "/reservations/add?" in line),
+        "",
+    )
+    check(
+        "subnet_id={{ subnet_id" in reservation_line,
+        f"results.html: the Create Reservation link must carry subnet_id= (got: {reservation_line!r})",
+    )
+    check(
+        "&subnet={{" not in reservation_line,
+        f"results.html: the Create Reservation link must not still carry the wrong subnet= alias (got: {reservation_line!r})",
+    )
+    check(
+        "h.ip|urlencode" in reservation_line and "subnet_id|urlencode" in reservation_line,
+        f"results.html: the Create Reservation link's values must be urlencoded (got: {reservation_line!r})",
+    )
+
     # ── register(): runs end to end against a stub that enforces Jen's rules ──
     calls = _stub_jen_plugin_api()
     try:

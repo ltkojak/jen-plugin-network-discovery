@@ -138,7 +138,7 @@
                 </form>
                 {% endif %}
                 {% if h.status in ('unknown', 'known', 'device', 'ipam') %}
-                <a href="/reservations/add?ip={{ h.ip }}&subnet={{ subnet_id }}{% if h.mac %}&mac={{ h.mac }}{% endif %}{% if h.hostname %}&hostname={{ h.hostname|urlencode }}{% endif %}" class="btn btn-sm btn-secondary" title="Create a Kea reservation" aria-label="Create a Kea reservation">{{ icon("pin") }}</a>
+                <a href="/reservations/add?ip={{ h.ip|urlencode }}&subnet_id={{ subnet_id|urlencode }}{% if h.mac %}&mac={{ h.mac|urlencode }}{% endif %}{% if h.hostname %}&hostname={{ h.hostname|urlencode }}{% endif %}" class="btn btn-sm btn-secondary" title="Create a Kea reservation" aria-label="Create a Kea reservation">{{ icon("pin") }}</a>
                 {% if ipam_installed %}
                 <a href="/network/ipam/subnet/kea/{{ subnet_id }}?ip={{ h.ip }}" class="btn btn-sm btn-secondary" title="Add an IPAM Lite entry" aria-label="Add an IPAM Lite entry">{{ icon("clipboard-list") }}</a>
                 {% endif %}
