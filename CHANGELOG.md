@@ -1,5 +1,22 @@
 # Network Discovery Plugin — Changelog
 
+## [1.3.0] - 2026-10-04
+
+Requires Jen 5.68.0 (a 5.68.0 beta satisfies it): this release registers an **investigation provider**.
+
+### Added: what the last scan saw, on Jen's Investigation page
+
+Jen's Investigation page (`/client`) now has a "What else Jen knows" section on its Overview, and this plugin
+contributes one card to it: what the newest finished scan of each subnet found on the client's MAC or on any of its
+addresses — the address, the status the scan gave it, the vendor and device type from the OUI table, the hostname or
+label seen, and when. A host whose status is still *unknown* once the operator's known-hosts list is applied makes it a
+"Needs a look" card, and its sentence also joins the Investigation page's one-line answer. A client no scan has seen adds
+no card. (The scan records what it found, not which ports it probed, so no ports are shown.)
+
+Known/unknown is re-derived from the list as it stands now, like every other reader of stored results, and the caller's
+subnet scope is in the query, before its limit, so a restricted caller never receives a row from a subnet outside the set
+Jen handed over. `requires_jen` moves to 5.68.0 because the hook does not exist before it.
+
 ## [1.2.4] - 2026-09-30
 
 The results page's Create Reservation link sent `subnet=`, a parameter

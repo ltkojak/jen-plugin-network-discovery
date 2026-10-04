@@ -6,7 +6,7 @@ Scan your subnets and account for every device on them. Finds every live host on
 
 ## Requirements
 
-- [Jen](https://github.com/ltkojak/jen-kea) v5.65.10 or later (v1.1.x runs on 5.34.0+)
+- [Jen](https://github.com/ltkojak/jen-kea) v5.68.0 or later (v1.2.x runs on 5.65.10+)
 - `nmap` on the Jen host — Settings → Plugins offers an **Install nmap** button on a systemd host (through Jen's root-run plugin service); elsewhere:
   ```bash
   sudo apt install nmap
@@ -33,6 +33,7 @@ Each found host gets one status, first match wins: `lease` (an active Kea lease,
 - Keeps the last 3 scans per subnet
 - Fires its own "Rogue Device" alert (opt a channel into it under Settings → Alerts) — only for *unknown* hosts the previous scan hadn't seen, compared by MAC so an IP hop doesn't re-alert; the alert lists hostname, vendor and MAC. A new unknown also writes a `discovery.unknown` event to Jen's Timeline
 - Discovered hosts show up in Jen's global search by MAC, IP, hostname, label or vendor, with when they were last seen
+- **On the Investigation page** (Jen 5.68.0): a card under "What else Jen knows" with what the newest scan of each subnet found on a client's MAC or addresses - status, vendor, device type, the name seen; a host nothing accounts for is a "Needs a look" card
 - Respects Jen subnet access control — restricted users only see and scan their assigned subnets; scanning needs an admin, and viewers are read-only. The known list applies to every subnet Jen scans, so marking or forgetting a host needs an administrator who can see every subnet (an admin scoped to some subnets sees the Known and Forget buttons removed and is refused if the request is made anyway; since 1.2.2)
 
 ## Installation

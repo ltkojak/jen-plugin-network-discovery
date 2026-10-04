@@ -57,7 +57,7 @@ def _stub_jen_plugin_api():
     harness predates that lesson. Note register() here wraps register_periodic in a try/except, so a
     violation would be SWALLOWED and the scheduled scans silently absent — hence the check below
     that the call actually landed. Returns the registered calls."""
-    calls = {"alert_types": [], "periodic": [], "search": [], "subnets": {1, 2, 9}}
+    calls = {"alert_types": [], "periodic": [], "search": [], "investigation": [], "subnets": {1, 2, 9}}
 
     def register_alert_type(plugin_id, type_id, **kwargs):
         prefix = f"{plugin_id}_"
@@ -75,6 +75,7 @@ def _stub_jen_plugin_api():
     plugin_api.register_alert_type = register_alert_type
     plugin_api.register_periodic = register_periodic
     plugin_api.register_search_provider = lambda *a, **k: calls["search"].append(a)
+    plugin_api.register_investigation_provider = lambda *a, **k: calls["investigation"].append((a, k))
     plugin_api.assert_subnet_access = lambda subnet_id: True
 
     def normalize_mac(raw):
@@ -750,6 +751,121 @@ def main():
         f"register(): the scheduled-scan tick actually registered — its failure is swallowed, so absence is silent (got {calls['periodic']})",
     )
     check(len(calls["search"]) == 1, "register(): one search provider")
+    check(
+        len(calls["investigation"]) == 1
+        and calls["investigation"][0][0] == ("network-discovery",)
+        and calls["investigation"][0][1]["fn"] is p._investigate,
+        "register(): exactly one investigation provider, the plugin's own",
+    )
+
+    # ── 1.3.0: the investigation provider ────────────────────────────────────
+    ns = types.SimpleNamespace
+    subject = ns(
+        mac="AA:BB:CC:DD:EE:01", ip="10.1.0.5", leases4=[{"ip": "10.1.0.5"}, {"ip": "10.1.0.6"}, {"ip": "x"}],
+        reservations=[{"ip": "10.1.0.7"}],
+    )  # fmt: skip
+    check(
+        p.subject_addresses(subject) == ["10.1.0.5", "10.1.0.6", "10.1.0.7"],
+        "subject_addresses: the typed address, the leases and the reservations, validated and de-duplicated",
+    )
+    check(p.investigation_card([]) is None, "investigation_card: a client no scan has seen adds no card")
+    import datetime as _dt
+
+    seen = _dt.datetime(2026, 10, 1, 8, 30)
+    row = {
+        "ip": "10.1.0.5", "mac": "aa:bb:cc:dd:ee:01", "hostname": "desk", "status": "lease", "rogue": 0, "label": "",
+        "vendor": "Dell", "device_type": "pc", "discovered_at": seen, "subnet_id": 1,
+    }  # fmt: skip
+    card = p.investigation_card([row])
+    check(
+        card["status"] == "ok" and "10.1.0.5 (lease), vendor Dell" in card["summary"],
+        f"investigation_card: a known host is an ok card (got {card['summary']!r})",
+    )
+    check(
+        {"label": "Name seen", "value": "desk"} in card["rows"]
+        and {"label": "Found by the scan at", "value": "2026-10-01 08:30 UTC"} in card["rows"]
+        and card["rows"][0]["href"] == "/network/discovery/results/1",
+        "investigation_card: the name seen, when it was found, and a link to that subnet's results",
+    )
+    check(
+        all("port" not in r["label"].lower() for r in card["rows"]),
+        "investigation_card: no ports are claimed - the scan does not store them",
+    )
+    unknown = p.investigation_card([dict(row, status="unknown", rogue=1)])
+    check(
+        unknown["status"] == "warn" and "nothing Jen knows accounts for it" in unknown["summary"],
+        f"investigation_card: a host still unknown is a warn card (got {unknown['summary']!r})",
+    )
+    many = p.investigation_card([dict(row, subnet_id=i) for i in range(1, 4)])
+    check(
+        "2 more results" in many["summary"],
+        f"investigation_card: more results in other scans are counted (got {many['summary']!r})",
+    )
+
+    # the impure provider, end to end through the plugin's own query
+    # (earlier checks replaced `_load_known` on this module; the provider's own reads are restored here)
+    p._load_known = types.FunctionType(
+        load_plugin()._load_known.__code__, p.__dict__, "_load_known"
+    )  # the real one, on p's own globals
+    queries = []
+
+    def answer(sql, params):
+        queries.append((sql, params))
+        if "FROM nd_known_hosts" in sql:
+            return []
+        return [dict(row)]
+
+    fdb = FakeDB(answer)
+    p._get_db = lambda: fdb
+    got = p._investigate(subject, {1}, False)
+    sql, params = queries[0]
+    check(
+        got is not None and got["href"] == "/network/discovery" and got["status"] == "ok",
+        f"_investigate: the card for a seeded client, linking to the plugin's own page (got {got})",
+    )
+    check(
+        "j.subnet_id IN (%s)" in sql
+        and "r.mac=%s" in sql
+        and "r.ip IN (%s,%s,%s)" in sql
+        and params == (1, "aa:bb:cc:dd:ee:01", "10.1.0.5", "10.1.0.6", "10.1.0.7"),
+        f"_investigate: the caller's scope, the MAC and the addresses are bound parameters of the one query (got {params})",
+    )
+    check("j2.status = 'done'" in sql, "_investigate: only each subnet's newest finished scan is read")
+    queries.clear()
+    fdb = FakeDB(answer)
+    p._get_db = lambda: fdb
+    check(
+        p._investigate(subject, set(), False) is None and queries == [],
+        "_investigate: a caller who may see no subnet runs no query at all",
+    )
+    queries.clear()
+    p._investigate(subject, None, True)
+    check("1=1" in queries[0][0], "_investigate: an unrestricted caller's scope is 1=1")
+    queries.clear()
+    check(
+        p._investigate(ns(mac="", ip="", leases4=[], reservations=[]), None, True) is None and queries == [],
+        "_investigate: a subject with no MAC and no address runs no query",
+    )
+    p._get_db = lambda: FakeDB(lambda sql, params: [])
+    check(p._investigate(subject, {1}, False) is None, "_investigate: an unknown client gets None")
+    p._get_db = lambda: FakeDB(
+        lambda sql, params: [] if "nd_known_hosts" in sql else [dict(row, status="unknown", rogue=1)]
+    )
+    check(
+        p._investigate(subject, {1}, False)["status"] == "warn",
+        "_investigate: an unknown host the known-hosts list does not cover stays a warn card",
+    )
+    p._get_db = lambda: FakeDB(
+        lambda sql, params: (
+            [{"mac": "aa:bb:cc:dd:ee:01", "ip": "", "note": "mine"}]
+            if "nd_known_hosts" in sql
+            else [dict(row, status="unknown", rogue=1)]
+        )
+    )
+    check(
+        p._investigate(subject, {1}, False)["status"] == "ok",
+        "_investigate: a host the operator marked known is no longer a warning",
+    )
 
     if failures:
         print(f"\n{len(failures)} check(s) failed")

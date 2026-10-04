@@ -1497,6 +1497,136 @@ def _discovery_search(query, accessible_subnet_ids, all_subnets):
     return out
 
 
+# ── Investigation provider (v1.3.0, Jen 5.68.0) ──────────────────────────────
+
+_INVESTIGATION_MAX_ROWS = 5
+
+
+def subject_addresses(subject):
+    """Pure: the IPv4 addresses this client is known by - the one the page was opened on, its active leases and its
+    reservations - each validated, de-duplicated and capped. A scan finds a host by address as often as by MAC."""
+    seen = []
+    candidates = [getattr(subject, "ip", "")]
+    candidates += [r.get("ip") for r in (getattr(subject, "leases4", None) or []) if isinstance(r, dict)]
+    candidates += [r.get("ip") for r in (getattr(subject, "reservations", None) or []) if isinstance(r, dict)]
+    for raw in candidates:
+        try:
+            addr = str(ipaddress.IPv4Address(str(raw).strip()))
+        except ValueError:
+            continue
+        if addr not in seen:
+            seen.append(addr)
+    return seen[:6]
+
+
+def _when(value):
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d %H:%M UTC")
+    return str(value) if value else ""
+
+
+def investigation_card(found):
+    """Pure: the Investigation page's card from the rows the newest finished scan of each subnet holds for this client
+    (status, vendor, device type, hostname and label seen, when found), or None when no scan has seen it. A host whose
+    status is still `unknown` after the operator's known-hosts list was applied is a warn card: a scan found it on the
+    network and nothing Jen knows accounts for it. The scan stores what it found, not the ports it probed, so none are shown."""
+    if not found:
+        return None
+    rows, unknown = [], 0
+    for r in found[:_INVESTIGATION_MAX_ROWS]:
+        status = r.get("status") or ("unknown" if r.get("rogue") else "lease")
+        if status == "unknown":
+            unknown += 1
+        what = [r["ip"], status]
+        if r.get("vendor"):
+            what.append(r["vendor"])
+        if r.get("device_type"):
+            what.append(r["device_type"])
+        rows.append(
+            {
+                "label": f"Subnet {r['subnet_id']}",
+                "value": " - ".join(what),
+                "href": f"/network/discovery/results/{r['subnet_id']}",
+            }
+        )
+        if r.get("hostname") or r.get("label"):
+            rows.append({"label": "Name seen", "value": r.get("hostname") or r.get("label")})
+        if r.get("discovered_at"):
+            rows.append({"label": "Found by the scan at", "value": _when(r["discovered_at"])})
+    first = found[0]
+    summary = f"The newest scan of subnet {first['subnet_id']} found {first['ip']} ({first.get('status') or 'seen'})"
+    if first.get("vendor"):
+        summary += f", vendor {first['vendor']}"
+    if len(found) > 1:
+        summary += f"; {len(found) - 1} more result{'s' if len(found) > 2 else ''} in other scans"
+    if unknown:
+        summary += " - nothing Jen knows accounts for it"
+    return {"summary": summary, "status": "warn" if unknown else "ok", "rows": rows}
+
+
+def _scan_rows_for_client(mac, addresses, accessible_subnet_ids, all_subnets):
+    """Each subnet's NEWEST finished scan's rows for this MAC or these addresses, inside the caller's own subnet scope - in
+    the query, before its LIMIT (the same rule as the search provider). Known/unknown is re-derived from the list as it
+    stands now, like every other reader of stored results."""
+    from jen.plugin_api import in_placeholders, search_scope
+
+    scope = search_scope(accessible_subnet_ids, all_subnets, "j.subnet_id")
+    if scope is None:
+        return []
+    scope_clause, scope_params = scope
+    identity, identity_params = [], []
+    if mac:
+        identity.append("r.mac=%s")
+        identity_params.append(mac)
+    if addresses:
+        identity.append(f"r.ip IN ({in_placeholders(addresses)})")
+        identity_params.extend(addresses)
+    if not identity:
+        return []
+    db = None
+    try:
+        db = _get_db()
+        with db.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT r.ip, r.mac, r.hostname, r.status, r.rogue, r.label, r.vendor, r.device_type, r.discovered_at, j.subnet_id
+                FROM nd_scan_results r
+                JOIN nd_scan_jobs j ON j.id = r.job_id
+                WHERE j.status = 'done' AND {scope_clause}
+                  AND j.id = (
+                      SELECT j2.id FROM nd_scan_jobs j2
+                      WHERE j2.subnet_id = j.subnet_id AND j2.status = 'done'
+                      ORDER BY j2.started_at DESC, j2.id DESC LIMIT 1
+                  )
+                  AND ({" OR ".join(identity)})
+                ORDER BY r.discovered_at DESC LIMIT {_INVESTIGATION_MAX_ROWS}
+                """,  # nosec B608 - scope_clause and the identity terms are fixed fragments with %s placeholders; every value is bound below
+                (*scope_params, *identity_params),
+            )
+            rows = list(cur.fetchall())
+    finally:
+        if db:
+            db.close()
+    for r in rows:
+        r["mac"] = (r.get("mac") or "").lower()
+    return apply_known(rows, _load_known()) if rows else rows
+
+
+def _investigate(subject, accessible_subnet_ids, all_subnets):
+    """The Investigation page's card for the client Jen resolved: what the newest finished scan of each subnet found on its
+    MAC or its addresses. Each row is judged on the subnet of the scan that found it, in the query, so a restricted caller
+    never receives a row from a subnet outside the set Jen handed over."""
+    from jen.plugin_api import normalize_mac
+
+    mac = normalize_mac(getattr(subject, "mac", "") or "")
+    card = investigation_card(
+        _scan_rows_for_client(mac, subject_addresses(subject), accessible_subnet_ids, all_subnets)
+    )
+    if card is not None:
+        card["href"] = "/network/discovery"
+    return card
+
+
 def register(app):
     app.register_blueprint(bp)
     # v1.1.0 — scheduled scans through Jen's periodic-job hook (5.30.0).
@@ -1508,7 +1638,7 @@ def register(app):
     except Exception as e:
         logger.warning(f"Network Discovery: scheduled scans unavailable on this Jen: {e}")
 
-    from jen.plugin_api import register_alert_type, register_search_provider
+    from jen.plugin_api import register_alert_type, register_investigation_provider, register_search_provider
 
     register_alert_type(
         PLUGIN_ID,
@@ -1518,5 +1648,6 @@ def register(app):
         default_template="🚨 <b>{subject}</b>\n{body}",
     )
     register_search_provider(PLUGIN_ID, title="Network Discovery", fn=_discovery_search)
+    register_investigation_provider(PLUGIN_ID, title="Network Discovery", fn=_investigate)
 
     logger.info("Network Discovery plugin registered")
