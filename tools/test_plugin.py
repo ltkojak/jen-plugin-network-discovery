@@ -77,6 +77,7 @@ def _stub_jen_plugin_api():
     plugin_api.register_search_provider = lambda *a, **k: calls["search"].append(a)
     plugin_api.register_investigation_provider = lambda *a, **k: calls["investigation"].append((a, k))
     plugin_api.assert_subnet_access = lambda subnet_id: True
+    plugin_api.ACTIVE_LEASE4 = "state = 0 AND expire > NOW()"
 
     def normalize_mac(raw):
         import re as _re
@@ -866,6 +867,19 @@ def main():
         p._investigate(subject, {1}, False)["status"] == "ok",
         "_investigate: a host the operator marked known is no longer a warning",
     )
+
+    # ── 1.3.1: the scan treats only a CURRENT lease as in Kea (Jen's ACTIVE_LEASE4, never a bare state = 0) ──
+    q = load_plugin()
+    _stub_jen_plugin_api()
+    kfdb = FakeDB(lambda sql, params: [{"ip": "10.0.0.7", "mac_hex": "AABBCCDDEE07"}] if "FROM lease4" in sql else [])
+    q._get_kea_db = lambda: kfdb
+    lease_ips, lease_macs, _res_ips, _res_macs = q._load_kea(1)
+    lease_sql = next(s for s, _ in kfdb.log if "FROM lease4" in s)
+    check(
+        "state = 0 AND expire > NOW()" in lease_sql and "state=0" not in lease_sql,
+        f"_load_kea: the lease query asks for a current lease, not a bare state = 0 (got {lease_sql!r})",
+    )
+    check(lease_ips == {"10.0.0.7"} and lease_macs == {"aa:bb:cc:dd:ee:07"}, "_load_kea: the rows are read as before")
 
     if failures:
         print(f"\n{len(failures)} check(s) failed")

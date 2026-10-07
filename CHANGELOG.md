@@ -1,5 +1,13 @@
 # Network Discovery Plugin — Changelog
 
+## [1.3.1] - 2026-10-07
+
+Requires Jen 5.68.0 (a 5.68.0 beta satisfies it); the constant this release uses is exported by Jen 5.68.0-beta.18 and later.
+
+### Fixed: what the scan treats as already in Kea
+
+The scan's "in Kea" sets read leases at `state=0` and nothing more, so an address whose lease had already expired (Kea keeps the row until reclamation) was still counted as a lease and a host answering from it was classified as known instead of unknown. The query now uses Jen's one definition of a current lease, `ACTIVE_LEASE4` (state 0 AND not past its expiry), exported through `jen.plugin_api`; the harness proves the query asks for it.
+
 ## [1.3.0] - 2026-10-04
 
 Requires Jen 5.68.0 (a 5.68.0 beta satisfies it): this release registers an **investigation provider**.
