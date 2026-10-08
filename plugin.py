@@ -923,7 +923,11 @@ def _expire_stale_running_jobs(cur):
 
 
 def _start_scan_thread(subnet_id, cidr, job_id, trigger="manual"):
-    """Run an ALREADY-RESERVED job (`_reserve_scan`) in a background thread."""
+    """Run an ALREADY-RESERVED job (`_reserve_scan`) in a background thread. Returns True when the thread started.
+
+    v1.3.2 - `_live_jobs.add(job_id)` came BEFORE an unguarded `Thread.start()`: a start that raised (the process out of threads) left the job
+    "live" for the life of the process, so the stale-job expiry never touched its reserved row and the subnet could not be scanned again. A start
+    that fails now takes the job out of `_live_jobs` again and marks its reserved row `error` with the reason, and the caller says so."""
     _live_jobs.add(job_id)
 
     def _bg():
@@ -933,7 +937,22 @@ def _start_scan_thread(subnet_id, cidr, job_id, trigger="manual"):
         finally:
             _live_jobs.discard(job_id)
 
-    threading.Thread(target=_bg, daemon=True).start()
+    try:
+        threading.Thread(target=_bg, daemon=True).start()
+    except Exception as e:
+        _live_jobs.discard(job_id)
+        logger.error(f"Network Discovery: could not start the scan thread for job {job_id}: {e}")
+        db = None
+        try:
+            db = _get_db()
+            _mark_job(db, job_id, "error", f"could not start the scan: {e}")
+        except Exception as mark_error:
+            logger.error(f"Network Discovery: could not mark job {job_id} as failed: {mark_error}")
+        finally:
+            if db:
+                db.close()
+        return False
+    return True
 
 
 # ── Scheduling (v1.1.0, Jen 5.30.0 register_periodic) ─────────────────────────
@@ -1109,7 +1128,12 @@ def start_scan(subnet_id):
         flash(f"A scan of {subnet_map[subnet_id]['name']} is already in progress.", "warning")
         return redirect(url_for("network_discovery.index"))
 
-    _start_scan_thread(subnet_id, cidr, job_id)
+    if not _start_scan_thread(subnet_id, cidr, job_id):
+        flash(
+            f"The scan of {subnet_map[subnet_id]['name']} could not be started (the server could not start a thread). Try again shortly.",
+            "error",
+        )
+        return redirect(url_for("network_discovery.index"))
     flash(f"Scan started for {subnet_map[subnet_id]['name']}. Results will appear in a moment.", "success")
     return redirect(url_for("network_discovery.index"))
 

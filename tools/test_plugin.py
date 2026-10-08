@@ -881,6 +881,53 @@ def main():
     )
     check(lease_ips == {"10.0.0.7"} and lease_macs == {"aa:bb:cc:dd:ee:07"}, "_load_kea: the rows are read as before")
 
+    # ── 1.3.2: a scan thread that cannot be started leaves nothing live ──
+    r = load_plugin()
+    _stub_jen_plugin_api()
+    rfdb = FakeDB(lambda sql, params: [])
+    r._get_db = lambda: rfdb
+
+    class NoThreads:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    real_thread = r.threading.Thread
+    r.threading.Thread = NoThreads
+    try:
+        r._live_jobs.clear()
+        started = r._start_scan_thread(1, "10.0.0.0/24", 77)
+    finally:
+        r.threading.Thread = real_thread
+    marked = [prm for sql, prm in rfdb.log if "UPDATE nd_scan_jobs SET status=%s" in sql]
+    check(started is False, "_start_scan_thread: a start that raises returns False")
+    check(77 not in r._live_jobs, "_start_scan_thread: a start that raises does not leave the job live")
+    check(
+        marked and marked[0][0] == "error" and "could not start the scan" in marked[0][3] and marked[0][4] == 77,
+        f"_start_scan_thread: the reserved row is marked error with the reason (got {marked})",
+    )
+
+    class OkThread:
+        def __init__(self, *a, **k):
+            self.target = k.get("target")
+
+        def start(self):
+            pass
+
+    r.threading.Thread = OkThread
+    try:
+        r._live_jobs.clear()
+        ok = r._start_scan_thread(1, "10.0.0.0/24", 78)
+    finally:
+        r.threading.Thread = real_thread
+    check(
+        ok is True and 78 in r._live_jobs,
+        "_start_scan_thread: a start that works returns True and the job stays live until its thread ends",
+    )
+    r._live_jobs.clear()
+
     if failures:
         print(f"\n{len(failures)} check(s) failed")
         return 1

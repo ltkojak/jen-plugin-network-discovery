@@ -1,5 +1,13 @@
 # Network Discovery Plugin — Changelog
 
+## [1.3.2] - 2026-10-08
+
+Requires Jen 5.68.0 (a 5.68.0 beta satisfies it); nothing new is used from Jen.
+
+### Fixed: a scan thread that could not be started no longer leaves the job "live"
+
+A manual scan reserves its job row, adds the job to the set of live jobs and then starts the scan thread - and the start was not guarded. If the server could not start a thread, the job stayed in the live set for the life of the process: the stale-job expiry skips a live job, so the reserved row stayed `queued` and the subnet could not be scanned again until Jen restarted. A start that fails now takes the job out of the live set, marks its row `error` with the reason, and the page says the scan could not be started. (The same mistake was fixed in Jen's own periodic-job runner in 5.68.0-beta.21.)
+
 ## [1.3.1] - 2026-10-07
 
 Requires Jen 5.68.0 (a 5.68.0 beta satisfies it); the constant this release uses is exported by Jen 5.68.0-beta.18 and later.
