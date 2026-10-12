@@ -1,5 +1,25 @@
 # Network Discovery Plugin — Changelog
 
+## [1.3.3] - 2026-10-12
+
+Fix and tidy-up from a whole-tree review of Jen's bundled plugins. `requires_jen` stays 5.68.0 (the Investigate macro and every `jen.plugin_api` name this release imports are in 5.68.0 and earlier).
+
+### Fixed: the scan schedule and the stale-job expiry no longer depend on the database session's time zone
+
+Scan jobs stamped their times with `NOW()` (and the column default, `CURRENT_TIMESTAMP`), which are the database SESSION's zone, while the scheduler read the finish time back and compared it with Python's UTC clock, and the stale-job expiry compared a start time with `NOW()`. Jen pins every connection to UTC from 5.69.0-beta.3, so on a current Jen the two agreed. On an older Jen, or a connection in another zone, they were apart by the zone's offset: a scan finished at 10:00 UTC could be read back as 12:00 and look as if it had finished in the future, so a schedule that was due would wait, or a running job would be expired two hours early or two hours late. Every time the schedule depends on is now written and compared with `UTC_TIMESTAMP()`: the job's queue time (the INSERT names `started_at` instead of relying on the column default), the moment it starts running, the finish stamp (done, error and the expiry's own), and the age test in the expiry. Each result row's `discovered_at`, which the page prints as UTC, is written the same way. No migration: the column types are unchanged and rows already stored are read as they always were (a row written in a non-UTC session by an earlier version is still off by that offset until it ages out; scan jobs are pruned to the last three per subnet, so that is at most a few scans). The harness checks the SQL of the queue, the run start, the finish, the expiry and a result insert, and that `NOW()` appears nowhere in the plugin.
+
+### Added: Investigate on every result row
+
+A result row names a client (its MAC, or its address when the scan saw no MAC, as on a routed subnet), and every row that does is meant to offer Jen's Investigate action. The results page imports Jen's `_investigate.html` macro and uses its icon form beside the row's other icon buttons. The harness renders the template through Jinja and checks the link for a row with a MAC and a row without.
+
+### Changed: the copied role helpers are Jen's
+
+The private `_is_superadmin` read the account's role directly; it is now `plugin_api.is_superadmin` (the same test, plus the authenticated check). The private `_is_admin` and `_require_write` are gone: `start_scan` is decorated with `jen.plugin_api.require_write`, with this plugin's own sentence and a redirect to its own page, so a viewer sees exactly what they saw before, and the places that asked `_is_admin()` ask `is_admin_or_above()`. The old `_is_admin` also swallowed an import failure and fell back to reading the role itself; that fallback is gone. `mark_known` keeps an inline `is_admin_or_above()` check with the same sentence rather than the decorator: its refusal goes back to the subnet's own results page, and the decorator redirects to an endpoint that takes no arguments. Left as they are, because Jen's API has no equivalent or the behaviour differs: `_when` (a plugin-local time formatter) and the local CSV-guard fallback inside `_safe_row` (it only runs when Jen's `safe_row` cannot be imported). The plugin has no JSON route that flashed on a role refusal: its one JSON route is the scan-status poll (login only, no role).
+
+### Documented: a column that is written and never read
+
+`nd_known_hosts.added_by` (the account that marked a host known) is recorded for the audit trail and is not displayed anywhere. It is not dropped: removing a column from a released table would be a destructive migration for no benefit. The README says so.
+
 ## [1.3.2] - 2026-10-08
 
 Requires Jen 5.68.0 (a 5.68.0 beta satisfies it); nothing new is used from Jen.

@@ -57,6 +57,8 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, flash, jsonify, make_response, redirect, render_template, request, url_for
 from flask_login import current_user, login_required
 
+from jen.plugin_api import is_admin_or_above, is_superadmin, require_write
+
 logger = logging.getLogger(__name__)
 
 PLUGIN_ID = "network-discovery"
@@ -86,6 +88,10 @@ _live_jobs = set()
 # A job still 'running' after this long is a leftover from a Jen restart
 # (the scan thread died with the process) — nothing will ever finish it.
 _STALE_RUNNING_MINUTES = 30
+
+# Every time the schedule and the stale-job expiry depend on (nd_scan_jobs.started_at / finished_at) is written with
+# UTC_TIMESTAMP() and compared with UTC_TIMESTAMP() or with Python's UTC clock, never the server's NOW or the column default
+# (CURRENT_TIMESTAMP): those are the SESSION's zone, which Jen only pins to UTC from 5.69.0-beta.3.
 
 # nmap's unprivileged -sn is a TCP connect() sweep; widening it past the
 # default 80/443 catches printers (9100), Windows (445/3389), SSH boxes
@@ -178,34 +184,13 @@ def _accessible_subnets():
     return get_accessible_subnet_map()
 
 
-def _is_superadmin():
-    return getattr(current_user, "role", "") == "superadmin"
-
-
-def _is_admin():
-    try:
-        from jen.plugin_api import is_admin_or_above
-
-        return is_admin_or_above()
-    except Exception:
-        # Fall back to a direct role check if the import shape ever changes.
-        role = getattr(current_user, "role", None)
-        if role is not None:
-            return role in ("superadmin", "admin")
-        return bool(getattr(current_user, "is_admin", False))
-
-
-def _require_write():
-    """v1.1.2 — start_scan and mark_known used to gate only on
-    assert_subnet_access, never the role: a read-only viewer could launch
-    an nmap sweep from the Jen host, or add/forget a nd_known_hosts row and
-    silence (or un-silence) a rogue_device alert for a MAC seen anywhere.
-    Every write route calls this FIRST, before assert_subnet_access and
-    before touching request.form."""
-    if _is_admin():
-        return True
-    flash("Viewers can look at Discovery but not scan or mark hosts.", "error")
-    return False
+# v1.1.2 — start_scan and mark_known used to gate only on assert_subnet_access, never the role: a read-only
+# viewer could launch an nmap sweep from the Jen host, or add/forget a nd_known_hosts row and silence (or
+# un-silence) a rogue_device alert for a MAC seen anywhere. Every write route checks the role FIRST, before
+# assert_subnet_access and before touching request.form. v1.3.3 — start_scan does it with Jen's own
+# `require_write`; mark_known checks `is_admin_or_above()` inline, because its refusal goes back to the
+# subnet's results page and the decorator only redirects to an endpoint that takes no arguments.
+_VIEWER_MESSAGE = "Viewers can look at Discovery but not scan or mark hosts."
 
 
 def _can_change_known():
@@ -213,7 +198,7 @@ def _can_change_known():
     column: a mark or a forget applies to that MAC or IP on EVERY subnet. Authorising it on the one
     subnet in the URL let an admin scoped to subnet A silence, or re-arm, the alert for subnet B's
     hosts. It is an all-subnets object, like an IPAM unmanaged subnet: an admin who can see every subnet."""
-    return _is_admin() and bool(getattr(current_user, "all_subnets", False))
+    return is_admin_or_above() and bool(getattr(current_user, "all_subnets", False))
 
 
 def _nmap_available():
@@ -700,7 +685,7 @@ def jobs_to_prune(others, keep):
 def _mark_job(db, job_id, status, error=None, hosts=0, unknown=0):
     with db.cursor() as cur:
         cur.execute(
-            "UPDATE nd_scan_jobs SET status=%s, finished_at=NOW(), hosts_found=%s, rogue_count=%s, error=%s WHERE id=%s",
+            "UPDATE nd_scan_jobs SET status=%s, finished_at=UTC_TIMESTAMP(), hosts_found=%s, rogue_count=%s, error=%s WHERE id=%s",
             (status, hosts, unknown, (error or "")[:255] or None, job_id),
         )
     db.commit()
@@ -726,8 +711,8 @@ def _reserve_scan(subnet_id):
             with db.cursor() as cur:
                 _expire_stale_running_jobs(cur)
                 cur.execute(
-                    "INSERT INTO nd_scan_jobs (subnet_id, status) "
-                    "SELECT %s, 'queued' FROM DUAL WHERE NOT EXISTS ("
+                    "INSERT INTO nd_scan_jobs (subnet_id, status, started_at) "
+                    "SELECT %s, 'queued', UTC_TIMESTAMP() FROM DUAL WHERE NOT EXISTS ("
                     "SELECT 1 FROM nd_scan_jobs WHERE subnet_id=%s AND status IN ('queued', 'running'))",
                     (subnet_id, subnet_id),
                 )
@@ -746,7 +731,7 @@ def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
     db = _get_db()
     try:
         with db.cursor() as cur:
-            cur.execute("UPDATE nd_scan_jobs SET status='running', started_at=NOW() WHERE id=%s", (job_id,))
+            cur.execute("UPDATE nd_scan_jobs SET status='running', started_at=UTC_TIMESTAMP() WHERE id=%s", (job_id,))
         db.commit()
 
         result = _scan_subnet(cidr)
@@ -780,8 +765,8 @@ def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
             for h in hosts:
                 cur.execute(
                     """
-                    INSERT INTO nd_scan_results (job_id, ip, mac, hostname, in_kea, rogue, status, label, vendor, device_type)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO nd_scan_results (job_id, ip, mac, hostname, in_kea, rogue, status, label, vendor, device_type, discovered_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, UTC_TIMESTAMP())
                     """,
                     (
                         job_id,
@@ -904,19 +889,19 @@ def _expire_stale_running_jobs(cur):
     queued a second scan of the same subnet. `_live_jobs` names the jobs whose thread is alive in this
     process; after a restart it is empty and the leftover expires as before."""
     cur.execute(
-        "UPDATE nd_scan_jobs SET status='error', error='interrupted (Jen restarted mid-scan)', finished_at=NOW() "
-        "WHERE status='running' AND started_at < NOW() - INTERVAL %s MINUTE",
+        "UPDATE nd_scan_jobs SET status='error', error='interrupted (Jen restarted mid-scan)', finished_at=UTC_TIMESTAMP() "
+        "WHERE status='running' AND started_at < UTC_TIMESTAMP() - INTERVAL %s MINUTE",
         (_STALE_RUNNING_MINUTES,),
     )
     cur.execute(
-        "SELECT id FROM nd_scan_jobs WHERE status='queued' AND started_at < NOW() - INTERVAL %s MINUTE",
+        "SELECT id FROM nd_scan_jobs WHERE status='queued' AND started_at < UTC_TIMESTAMP() - INTERVAL %s MINUTE",
         (_STALE_RUNNING_MINUTES,),
     )
     for row in cur.fetchall():
         if row["id"] in _live_jobs:
             continue
         cur.execute(
-            "UPDATE nd_scan_jobs SET status='error', error='interrupted (Jen restarted mid-scan)', finished_at=NOW() "
+            "UPDATE nd_scan_jobs SET status='error', error='interrupted (Jen restarted mid-scan)', finished_at=UTC_TIMESTAMP() "
             "WHERE id=%s AND status='queued'",
             (row["id"],),
         )
@@ -1085,18 +1070,16 @@ def index():
         schedule_choices=_SCHEDULE_CHOICES,
         scope_errors={sid: scan_scope_error(info["cidr"]) for sid, info in subnet_map.items()},
         scanner_ok=_nmap_available(),
-        can_install_nmap=_can_install_nmap() and _is_superadmin(),
-        is_superadmin=_is_superadmin(),
+        can_install_nmap=_can_install_nmap() and is_superadmin(),
+        is_superadmin=is_superadmin(),
         plugin_id=PLUGIN_ID,
     )
 
 
 @bp.route("/scan/<int:subnet_id>", methods=["POST"])
 @login_required
+@require_write(_VIEWER_MESSAGE, "network_discovery.index")
 def start_scan(subnet_id):
-    if not _require_write():
-        return redirect(url_for("network_discovery.index"))
-
     from jen.plugin_api import assert_subnet_access
 
     if not assert_subnet_access(subnet_id):
@@ -1143,7 +1126,7 @@ def start_scan(subnet_id):
 def set_schedule(subnet_id):
     """v1.1.0 — per-subnet scan interval (hours; 0 = off). Superadmin: it
     starts unattended scanning."""
-    if not _is_superadmin():
+    if not is_superadmin():
         flash("Only a superadmin can schedule scans.", "error")
         return redirect(url_for("network_discovery.index"))
     subnet_map = _subnet_map()
@@ -1351,7 +1334,8 @@ def mark_known(subnet_id):
     """v1.1.0 — "I know this one": never alert on this MAC (or IP, when
     there's no MAC) again; shows as `known` on every future scan.
     `action=forget` removes it."""
-    if not _require_write():
+    if not is_admin_or_above():
+        flash(_VIEWER_MESSAGE, "error")
         return redirect(url_for("network_discovery.results", subnet_id=subnet_id))
 
     from jen.plugin_api import assert_subnet_access

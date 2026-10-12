@@ -35,6 +35,9 @@ Each found host gets one status, first match wins: `lease` (an active Kea lease,
 - Discovered hosts show up in Jen's global search by MAC, IP, hostname, label or vendor, with when they were last seen
 - **On the Investigation page** (Jen 5.68.0): a card under "What else Jen knows" with what the newest scan of each subnet found on a client's MAC or addresses - status, vendor, device type, the name seen; a host nothing accounts for is a "Needs a look" card
 - Respects Jen subnet access control — restricted users only see and scan their assigned subnets; scanning needs an admin, and viewers are read-only. The known list applies to every subnet Jen scans, so marking or forgetting a host needs an administrator who can see every subnet (an admin scoped to some subnets sees the Known and Forget buttons removed and is refused if the request is made anyway; since 1.2.2)
+- Every result row that names a client carries Jen's **Investigate** action (the MAC, or the address for a host with none)
+- All times the schedule depends on are written and compared in UTC (`UTC_TIMESTAMP()`), whatever zone the database session is in
+- **Recorded, not displayed**: `nd_known_hosts.added_by` (the account that marked a host known) is written for the audit trail and is not shown anywhere on the page; there is no migration to drop it
 
 ## Installation
 

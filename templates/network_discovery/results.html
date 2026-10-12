@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from '_investigate.html' import investigate_link %}
 {% block title %}Discovery Results — {{ subnet.name }}{% endblock %}
 {% block content %}
 
@@ -123,6 +124,7 @@
             <td class="nd-865c33" data-m="hide">{{ h.discovered_at | utcfmt if h.discovered_at else '—' }}</td>
             <td class="nd-86abda" data-m="trailing">
                 <div class="nd-74cac9">
+                {{ investigate_link(h.mac or h.ip, "icon") }}
                 {% if h.status == 'unknown' and can_change_known %}
                 <form method="POST" action="{{ url_for('network_discovery.mark_known', subnet_id=subnet_id) }}" class="nd-cccfa4">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

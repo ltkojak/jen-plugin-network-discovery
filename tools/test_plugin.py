@@ -10,6 +10,7 @@ nmap / neighbour-table parsers, scope and timeout rules, scheduling).
 Run: `python3 tools/test_plugin.py` (exit 1 on the first failing check).
 """
 
+import functools
 import importlib.util
 import ipaddress
 import os
@@ -42,6 +43,47 @@ def _stub_modules():
     fl.current_user = types.SimpleNamespace(username="tester", role="superadmin")
     fl.login_required = lambda fn: fn
     sys.modules["flask_login"] = fl
+
+    # plugin.py imports `require_write` / `is_admin_or_above` / `is_superadmin` from jen.plugin_api at the top (a
+    # decorator has to exist when the route is defined). The names are put on whatever `jen.plugin_api` module is
+    # current (the later checks swap in narrower stubs and then load_plugin() again), bound to THIS load's
+    # flask_login. The gate is Jen's real one in shape (jen/services/plugin_helpers.py::require_write): an admin
+    # passes, a JSON or /api/ request gets a 403 body, anything else a flash and a redirect; what it did is recorded
+    # in GATE_CALLS so a check can see that a refusal flashed.
+    api = sys.modules.get("jen.plugin_api")
+    if api is None:
+        api = types.ModuleType("jen.plugin_api")
+        jen_pkg = sys.modules.get("jen") or types.ModuleType("jen")
+        jen_pkg.plugin_api = api
+        sys.modules["jen"] = jen_pkg
+        sys.modules["jen.plugin_api"] = api
+
+    def is_admin_or_above():
+        return fl.current_user.role in ("superadmin", "admin")
+
+    def is_superadmin():
+        return fl.current_user.role == "superadmin"
+
+    def require_write(message="Viewers can look at this but not change it.", redirect_endpoint="dashboard.dashboard"):
+        def deco(fn):
+            @functools.wraps(fn)
+            def wrapped(*args, **kwargs):
+                if is_admin_or_above():
+                    return fn(*args, **kwargs)
+                req = flask.request
+                if req is not None and (req.is_json or req.path.startswith("/api/")):
+                    GATE_CALLS.append(("json", message))
+                    return ({"error": message}, 403)
+                GATE_CALLS.append(("flash", message))
+                return ("gate-redirect", redirect_endpoint)
+
+            return wrapped
+
+        return deco
+
+    api.is_admin_or_above = is_admin_or_above
+    api.is_superadmin = is_superadmin
+    api.require_write = require_write
 
 
 class _FakeApp:
@@ -128,6 +170,7 @@ def load_plugin():
 
 
 failures = []
+GATE_CALLS = []  # what the stub require_write refused, and how: ("flash", message) or ("json", message)
 
 
 def check(cond, msg):
@@ -300,23 +343,44 @@ def main():
 
     # ── write gate (v1.1.2) — viewers can look at Discovery but not scan or mark hosts ─
     p.current_user.role = "viewer"
-    check(p._is_admin() is False, "a viewer is not admin")
-    check(p._require_write() is False, "a viewer cannot write")
-    # request is None in this harness; a route that reaches request.form
-    # raises AttributeError, so returning None without raising proves
-    # _require_write() stopped it first.
-    for fn, args in (
-        (p.start_scan, (1,)),
-        (p.mark_known, (1,)),
-    ):
-        try:
-            fn(*args)
-            gated = True
-        except Exception:
-            gated = False
-        check(gated, f"{fn.__name__} refuses a viewer before touching the request")
+    check(p.is_admin_or_above() is False, "a viewer is not admin")
+    check(p.is_superadmin() is False, "a viewer is not superadmin")
+    # request is None in this harness; a route that reaches request.form raises AttributeError, so a clean refusal
+    # proves the role check stopped it first.
+    GATE_CALLS.clear()
+    try:
+        answer = p.start_scan(1)
+        gated = True
+    except Exception:
+        answer, gated = None, False
+    check(
+        gated
+        and answer == ("gate-redirect", "network_discovery.index")
+        and GATE_CALLS == [("flash", p._VIEWER_MESSAGE)],
+        "start_scan refuses a viewer before touching the request (plugin_api.require_write: flash + redirect)",
+    )
+    # mark_known's refusal goes back to the subnet's own results page, so it checks the role inline
+    g = load_plugin()
+    g.current_user.role = "viewer"
+    said = []
+    g.flash = lambda msg, cat="message": said.append(msg)
+    g.redirect = lambda where: ("redirect", where)
+    g.url_for = lambda endpoint, **kw: (endpoint, kw)
+    try:
+        answer = g.mark_known(1)
+        gated = True
+    except Exception:
+        answer, gated = None, False
+    check(
+        gated
+        and said == [g._VIEWER_MESSAGE]
+        and answer == ("redirect", ("network_discovery.results", {"subnet_id": 1})),
+        f"mark_known refuses a viewer before touching the request, back to the subnet's results page (got {answer}, {said})",
+    )
     p.current_user.role = "superadmin"
-    check(p._is_admin() is True, "superadmin role restored for the rest of the run")
+    check(
+        p.is_admin_or_above() is True and p.is_superadmin() is True, "superadmin role restored for the rest of the run"
+    )
 
     _stub_jen_plugin_api()  # the routes below import assert_subnet_access from it
 
@@ -684,6 +748,107 @@ def main():
         f"_reserve_scan: a second reservation for a pending subnet gets None (got {first}, {second})",
     )
     check(p._reserve_scan(6) == 99, "_reserve_scan: a different subnet is unaffected")
+
+    # ── 1.3.3: every time the cadence depends on is written and compared with UTC_TIMESTAMP(), never NOW() ──
+    reserve_sql = " ".join(sql for sql, _p in rdb.log if sql.startswith("INSERT INTO nd_scan_jobs"))
+    check(
+        "started_at" in reserve_sql and "UTC_TIMESTAMP()" in reserve_sql,
+        f"_reserve_scan: the queue time is written explicitly with UTC_TIMESTAMP(), not the column default (got {reserve_sql!r})",
+    )
+    sc = StaleCursor()
+    p._live_jobs.clear()
+    p._expire_stale_running_jobs(sc)
+    stale_sql = " ".join(sql for sql, _p in sc.log)
+    check(
+        "UTC_TIMESTAMP() - INTERVAL" in stale_sql
+        and "finished_at=UTC_TIMESTAMP()" in stale_sql
+        and "NOW()" not in stale_sql,
+        f"_expire_stale_running_jobs: the age test and the finish stamp both use UTC_TIMESTAMP() (got {stale_sql!r})",
+    )
+    p._scan_subnet = lambda cidr: {"hosts": [{"ip": "10.0.0.5", "mac": "", "hostname": "h"}]}
+    p._subnet_ctx = lambda sid, cidr: ctx_full
+    p._load_kea = lambda sid: (set(), set(), set(), set())
+    p._load_ipam = lambda sid: ({}, {})
+    p._load_devices = lambda macs: {}
+    p._load_known = dict
+    tdb = FakeDB()
+    p._get_db = lambda: tdb
+    p._run_scan_job(1, "10.0.0.0/24", 21)
+    scan_sql = [sql for sql, _p in tdb.log]
+    check(
+        any(
+            s.startswith("UPDATE nd_scan_jobs SET status='running'") and "started_at=UTC_TIMESTAMP()" in s
+            for s in scan_sql
+        )
+        and any(
+            s.startswith("UPDATE nd_scan_jobs SET status=%s") and "finished_at=UTC_TIMESTAMP()" in s for s in scan_sql
+        )
+        and any(s.startswith("INSERT INTO nd_scan_results") and "UTC_TIMESTAMP()" in s for s in scan_sql)
+        and not any("NOW()" in s for s in scan_sql),
+        "_run_scan_job: the run start, the finish stamp and every result's discovered_at are UTC_TIMESTAMP(); no NOW()",
+    )
+    with open(os.path.join(ROOT, "plugin.py"), encoding="utf-8") as src:
+        check(
+            "NOW()" not in src.read(), "plugin.py: NOW() appears nowhere (the lease predicate is Jen's ACTIVE_LEASE4)"
+        )
+
+    # ── 1.3.3: a result row that names a client carries Jen's Investigate link (MAC, else the address) ──
+    try:
+        import jinja2
+    except ImportError:  # the harness is stdlib-only; verify.py (which needs jinja2) parses the templates anyway
+        jinja2 = None
+    if jinja2 is not None:
+        # A faithful copy of Jen's templates/_investigate.html macro (menu and icon kinds) and a bare base: enough to
+        # render this page's own template through the real Jinja and read the links it prints.
+        macro = (
+            '{% macro investigate_link(who, kind="menu") -%}{%- if who -%}'
+            '{%- if kind == "icon" -%}<a href="/client?q={{ who|urlencode }}" class="btn btn-sm btn-secondary" '
+            'title="Investigate {{ who }}">{{ icon("search", "", "Investigate") }}</a>'
+            '{%- else -%}<a href="/client?q={{ who|urlencode }}" class="action-menu-item">{{ icon("search") }} Investigate</a>'
+            "{%- endif -%}{%- endif -%}{%- endmacro %}"
+        )
+        with open(os.path.join(ROOT, "templates", "network_discovery", "results.html"), encoding="utf-8") as src:
+            results_src = src.read()
+        env = jinja2.Environment(
+            loader=jinja2.DictLoader(
+                {
+                    "base.html": "{% block title %}{% endblock %}{% block content %}{% endblock %}",
+                    "_investigate.html": macro,
+                    "results.html": results_src,
+                }
+            ),
+            autoescape=True,
+        )
+        env.filters["utcfmt"] = lambda v: str(v)
+        env.globals.update(
+            icon=lambda *a, **k: "[icon]", csrf_token=lambda: "t", url_for=lambda *a, **k: "/x", csp_nonce="n"
+        )
+        page = env.get_template("results.html").render(
+            subnet={"name": "lan", "cidr": "10.0.0.0/24"},
+            subnet_id=1,
+            job={"status": "done", "finished_at": None},
+            newer_job=None,
+            statuses=[],
+            counts={},
+            status_icons={},
+            status_labels={},
+            can_change_known=False,
+            ipam_installed=False,
+            appeared=[],
+            gone=[],
+            hosts=[
+                {"ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:05", "status": "unknown", "hostname": "", "label": ""},
+                {"ip": "10.0.0.6", "mac": "", "status": "lease", "hostname": "", "label": ""},
+            ],
+        )
+        check(
+            "/client?q=aa%3Abb%3Acc%3Add%3Aee%3A05" in page,
+            "template: a result row with a MAC carries the Investigate link for that MAC",
+        )
+        check(
+            "/client?q=10.0.0.6" in page,
+            "template: a result row with no MAC (a routed host) carries it for its address",
+        )
 
     # ── 1.2.3 (Q100 c): the poll route uses subnet_or_404, not the flashing assert_subnet_access ──
     _stub_jen_plugin_api()
