@@ -1,5 +1,19 @@
 # Network Discovery Plugin — Changelog
 
+## [1.3.4] - 2026-10-12
+
+A viewer is no longer shown controls the plugin will refuse. `requires_jen` (5.68.0), `plugin_api` (3) and every migration are unchanged, and no route, query or stored value changes.
+
+### Fixed: the scan buttons were printed to every account
+
+`start_scan` is admin-or-above (Jen's `require_write`; a refused viewer is flashed "Viewers can look at Discovery but not scan or mark hosts." and sent back), but the results page printed its Re-scan button, and the Discovery overview printed Scan Now / Re-scan on every subnet card, to a read-only account, which then clicked it and was refused. An independent review of the rendered pages as a viewer account found it. The Known and Forget forms (`_can_change_known`), the schedule form (superadmin) and the Install nmap button (superadmin) were already hidden by their own rules and are unchanged.
+
+Both routes now hand the template `can_write`, computed by the same `is_admin_or_above()` that `require_write` asks, and the template wraps every control that needs it. On the results page that is Re-scan, and also the Create Reservation link and the Add an IPAM Lite entry link on each row: the first opens a Jen page only an admin may use and the second opens IPAM's edit modal, which IPAM 1.7.3 no longer prints for a viewer, so a viewer was being offered two links that dead-end. On the overview it is the Scan Now / Re-scan form. A viewer keeps every read control: the cards and counts, View Results, the results table with its status filters, the CSV export and the Investigate link on every row that names a client. An admin's pages are unchanged.
+
+### Tested
+
+`tools/test_plugin.py` renders `results.html` and `index.html` through the real Jinja as a viewer, an admin, a subnet-scoped admin and a superadmin, and asserts every control above is absent for the viewer and present for the admin, that Re-scan follows `can_write` alone, that the Known and Forget forms still follow `_can_change_known`, that the schedule form stays superadmin-only, and that the CSV export, the filters and the Investigate links remain. It also calls the real `results` and `index` routes as each role and checks the variable they hand the page.
+
 ## [1.3.3] - 2026-10-12
 
 Fix and tidy-up from a whole-tree review of Jen's bundled plugins. `requires_jen` stays 5.68.0 (the Investigate macro and every `jen.plugin_api` name this release imports are in 5.68.0 and earlier).

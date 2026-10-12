@@ -143,7 +143,7 @@
         {% if last.get('status') in ('done', 'error') %}
         <a href="{{ url_for('network_discovery.results', subnet_id=subnet_id) }}" class="btn btn-sm btn-secondary">View Results</a>
         {% endif %}
-        {% if scanner_ok and last.get('status') not in ('running', 'queued') and not scope %}
+        {% if can_write and scanner_ok and last.get('status') not in ('running', 'queued') and not scope %}
         <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}" class="nd-cccfa4">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-sm btn-primary">{% if last.get('status') %}{{ icon("refresh-cw") }} Re-scan{% else %}{{ icon("search") }} Scan Now{% endif %}</button>

@@ -1093,6 +1093,150 @@ def main():
     )
     r._live_jobs.clear()
 
+    # ── 1.3.4: a viewer is not shown a control the route refuses; the page is handed the rule the route enforces ──
+    # start_scan is admin-or-above (require_write), mark_known is _can_change_known() (an admin who sees every subnet),
+    # set_schedule and the nmap install are superadmin. The pages used to print Re-scan / Scan Now to every account.
+    _stub_jen_plugin_api()
+    p.render_template = lambda name, **kw: kw
+    p.url_for = lambda *a, **k: "/x"
+    p._subnet_map = lambda: {1: {"name": "n", "cidr": "10.0.0.0/24"}}
+    p._accessible_subnets = lambda: {1: {"name": "n", "cidr": "10.0.0.0/24"}}
+    p._schedules = dict
+    p._load_known = dict
+    p._get_db = lambda: FakeDB(only_error)
+    seen = {}
+    for who, role, all_subnets in (
+        ("viewer", "viewer", True),
+        ("scoped admin", "admin", False),
+        ("admin", "admin", True),
+        ("superadmin", "superadmin", True),
+    ):
+        p.current_user.role, p.current_user.all_subnets = role, all_subnets
+        seen[who] = (p.results(1), p.index())
+    p.current_user.role, p.current_user.all_subnets = "superadmin", True
+    check(
+        seen["viewer"][0]["can_write"] is False and seen["viewer"][1]["can_write"] is False,
+        "results and index: a viewer is handed can_write=False",
+    )
+    check(
+        all(
+            seen[w][0]["can_write"] is True and seen[w][1]["can_write"] is True
+            for w in ("scoped admin", "admin", "superadmin")
+        ),
+        "results and index: an admin, a scoped admin and a superadmin are handed can_write=True (start_scan is role-only)",
+    )
+    check(
+        seen["viewer"][1]["is_superadmin"] is False
+        and seen["admin"][1]["is_superadmin"] is False
+        and seen["superadmin"][1]["is_superadmin"] is True,
+        "index: the schedule form stays superadmin-only (set_schedule's own rule)",
+    )
+    check(
+        seen["scoped admin"][0]["can_change_known"] is False and seen["admin"][0]["can_change_known"] is True,
+        "results: the Known / Forget forms follow _can_change_known (an admin who sees every subnet), unchanged",
+    )
+
+    if jinja2 is not None:
+        with open(os.path.join(ROOT, "templates", "network_discovery", "index.html"), encoding="utf-8") as src:
+            index_src = src.read()
+        env2 = jinja2.Environment(
+            loader=jinja2.DictLoader(
+                {
+                    "base.html": "{% block title %}{% endblock %}{% block content %}{% endblock %}",
+                    "_investigate.html": macro,
+                    "results.html": results_src,
+                    "index.html": index_src,
+                }
+            ),
+            autoescape=True,
+        )
+        env2.filters["utcfmt"] = lambda v: str(v)
+        env2.globals.update(
+            icon=lambda *a, **k: "[icon]",
+            csrf_token=lambda: "t",
+            url_for=lambda endpoint, **k: "/" + endpoint,
+            csp_nonce="n",
+            ipv6_enabled=False,
+        )
+        hosts = [
+            {"ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:05", "status": "unknown", "hostname": "", "label": ""},
+            {"ip": "10.0.0.6", "mac": "aa:bb:cc:dd:ee:06", "status": "known", "hostname": "", "label": ""},
+            {"ip": "10.0.0.7", "mac": "aa:bb:cc:dd:ee:07", "status": "ipam", "hostname": "", "label": ""},
+        ]
+
+        def render_results(can_write, can_change_known):
+            return env2.get_template("results.html").render(
+                subnet={"name": "lan", "cidr": "10.0.0.0/24"},
+                subnet_id=1,
+                job={"status": "done", "finished_at": None},
+                newer_job=None,
+                statuses=["unknown", "known", "ipam"],
+                counts={"unknown": 1, "known": 1, "ipam": 1},
+                status_icons={"unknown": "x", "known": "x", "ipam": "x"},
+                status_labels={"unknown": "Unknown", "known": "Known", "ipam": "IPAM"},
+                can_change_known=can_change_known,
+                can_write=can_write,
+                ipam_installed=True,
+                appeared=[],
+                gone=[],
+                hosts=hosts,
+            )
+
+        viewer_results = render_results(False, False)
+        admin_results = render_results(True, True)
+        for marker, what in (
+            ("/network_discovery.start_scan", "the Re-scan form"),
+            ("/reservations/add?", "the Create Reservation link"),
+            ("/network/ipam/subnet/kea/1", "the IPAM entry link"),
+            ("/network_discovery.mark_known", "the Known / Forget forms"),
+        ):
+            check(marker not in viewer_results, f"results.html as a viewer: {what} is absent")
+            check(marker in admin_results, f"results.html as an admin: {what} is present")
+        check(
+            "/network_discovery.export_results" in viewer_results
+            and "/client?q=aa%3Abb%3Acc%3Add%3Aee%3A05" in viewer_results
+            and 'id="nd-filters"' in viewer_results,
+            "results.html as a viewer: the CSV export, the filters and the Investigate links are all still there",
+        )
+        check(
+            "/network_discovery.start_scan" not in render_results(False, True),
+            "results.html: Re-scan follows can_write alone (can_change_known does not bring it back)",
+        )
+
+        def render_index(can_write, is_super):
+            return env2.get_template("index.html").render(
+                subnet_map={1: {"name": "lan", "cidr": "10.0.0.0/24"}},
+                scan_summary={1: {"status": "done", "hosts_found": 3, "rogue_count": 1, "finished_at": None}},
+                schedules={},
+                schedule_choices=[0, 1, 24],
+                scope_errors={},
+                scanner_ok=True,
+                can_install_nmap=False,
+                is_superadmin=is_super,
+                can_write=can_write,
+                plugin_id="network-discovery",
+            )
+
+        check(
+            "/network_discovery.start_scan" not in render_index(False, False)
+            and "/network_discovery.set_schedule" not in render_index(False, False),
+            "index.html as a viewer: no Scan Now / Re-scan form and no schedule form",
+        )
+        check(
+            "/network_discovery.results" in render_index(False, False),
+            "index.html as a viewer: View Results is still there",
+        )
+        check(
+            "/network_discovery.start_scan" in render_index(True, False)
+            and "/network_discovery.set_schedule" not in render_index(True, False),
+            "index.html as an admin: Re-scan is there, the schedule form is not (superadmin only)",
+        )
+        check(
+            "/network_discovery.start_scan" in render_index(True, True)
+            and "/network_discovery.set_schedule" in render_index(True, True),
+            "index.html as a superadmin: Re-scan and the schedule form are both there",
+        )
+
     if failures:
         print(f"\n{len(failures)} check(s) failed")
         return 1

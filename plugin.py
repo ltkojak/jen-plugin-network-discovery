@@ -1072,6 +1072,7 @@ def index():
         scanner_ok=_nmap_available(),
         can_install_nmap=_can_install_nmap() and is_superadmin(),
         is_superadmin=is_superadmin(),
+        can_write=is_admin_or_above(),
         plugin_id=PLUGIN_ID,
     )
 
@@ -1258,6 +1259,7 @@ def results(subnet_id):
         job=job,
         newer_job=latest_job if latest_job and job and latest_job["id"] != job["id"] else None,
         can_change_known=_can_change_known(),
+        can_write=is_admin_or_above(),
         hosts=hosts,
         counts=counts,
         statuses=_STATUSES,

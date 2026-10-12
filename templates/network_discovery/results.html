@@ -11,10 +11,12 @@
     <div class="nd-3de8f9">
         <a href="{{ url_for('network_discovery.index') }}" class="btn btn-secondary">← Back</a>
         {% if job %}<a href="{{ url_for('network_discovery.export_results', subnet_id=subnet_id) }}" class="btn btn-secondary">{{ icon("download") }} CSV</a>{% endif %}
+        {% if can_write %}
         <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-primary">{{ icon("refresh-cw") }} Re-scan</button>
         </form>
+        {% endif %}
     </div>
 </div>
 
@@ -139,7 +141,7 @@
                     <button type="submit" class="btn btn-sm btn-secondary" title="Count it as unknown again">Forget</button>
                 </form>
                 {% endif %}
-                {% if h.status in ('unknown', 'known', 'device', 'ipam') %}
+                {% if can_write and h.status in ('unknown', 'known', 'device', 'ipam') %}
                 <a href="/reservations/add?ip={{ h.ip|urlencode }}&subnet_id={{ subnet_id|urlencode }}{% if h.mac %}&mac={{ h.mac|urlencode }}{% endif %}{% if h.hostname %}&hostname={{ h.hostname|urlencode }}{% endif %}" class="btn btn-sm btn-secondary" title="Create a Kea reservation" aria-label="Create a Kea reservation">{{ icon("pin") }}</a>
                 {% if ipam_installed %}
                 <a href="/network/ipam/subnet/kea/{{ subnet_id }}?ip={{ h.ip }}" class="btn btn-sm btn-secondary" title="Add an IPAM Lite entry" aria-label="Add an IPAM Lite entry">{{ icon("clipboard-list") }}</a>
