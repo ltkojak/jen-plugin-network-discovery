@@ -14,6 +14,7 @@ import functools
 import importlib.util
 import ipaddress
 import os
+import pathlib
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -469,11 +470,11 @@ def main():
     ctx_full = {"gateways": [], "dns": [], "pools": [], "infrastructure": {}, "notes": ""}
     long_name = "h" * 300
     p._scan_subnet = lambda cidr: {"hosts": [{"ip": "10.0.0.5", "mac": "", "hostname": long_name}]}
-    p._subnet_ctx = lambda sid, cidr: ctx_full
-    p._load_kea = lambda sid: (set(), set(), set(), set())
-    p._load_ipam = lambda sid: ({}, {})
-    p._load_devices = lambda macs: {}
-    p._load_known = dict
+    p._subnet_ctx = lambda sid, cidr, strict=False: ctx_full
+    p._load_kea = lambda sid, strict=False: (set(), set(), set(), set())
+    p._load_ipam = lambda sid, strict=False: ({}, {})
+    p._load_devices = lambda macs, strict=False: {}
+    p._load_known = lambda strict=False: {}
     fdb = FakeDB()
     p._get_db = lambda: fdb
     p._run_scan_job(1, "10.0.0.0/24", 7)
@@ -766,11 +767,11 @@ def main():
         f"_expire_stale_running_jobs: the age test and the finish stamp both use UTC_TIMESTAMP() (got {stale_sql!r})",
     )
     p._scan_subnet = lambda cidr: {"hosts": [{"ip": "10.0.0.5", "mac": "", "hostname": "h"}]}
-    p._subnet_ctx = lambda sid, cidr: ctx_full
-    p._load_kea = lambda sid: (set(), set(), set(), set())
-    p._load_ipam = lambda sid: ({}, {})
-    p._load_devices = lambda macs: {}
-    p._load_known = dict
+    p._subnet_ctx = lambda sid, cidr, strict=False: ctx_full
+    p._load_kea = lambda sid, strict=False: (set(), set(), set(), set())
+    p._load_ipam = lambda sid, strict=False: ({}, {})
+    p._load_devices = lambda macs, strict=False: {}
+    p._load_known = lambda strict=False: {}
     tdb = FakeDB()
     p._get_db = lambda: tdb
     p._run_scan_job(1, "10.0.0.0/24", 21)
@@ -971,7 +972,7 @@ def main():
     # the impure provider, end to end through the plugin's own query
     # (earlier checks replaced `_load_known` on this module; the provider's own reads are restored here)
     p._load_known = types.FunctionType(
-        load_plugin()._load_known.__code__, p.__dict__, "_load_known"
+        load_plugin()._load_known.__code__, p.__dict__, "_load_known", (False,)
     )  # the real one, on p's own globals
     queries = []
 
@@ -1102,7 +1103,7 @@ def main():
     p._subnet_map = lambda: {1: {"name": "n", "cidr": "10.0.0.0/24"}}
     p._accessible_subnets = lambda: {1: {"name": "n", "cidr": "10.0.0.0/24"}}
     p._schedules = dict
-    p._load_known = dict
+    p._load_known = lambda strict=False: {}
     p._get_db = lambda: FakeDB(only_error)
     seen = {}
     for who, role, all_subnets in (
@@ -1236,6 +1237,226 @@ def main():
             and "/network_discovery.set_schedule" in render_index(True, True),
             "index.html as a superadmin: Re-scan and the schedule form are both there",
         )
+
+    # ── 1.3.5 (ND-1): a read that FAILS is not "nothing there" for a scan ─────────────────────────────────────────────
+    n = load_plugin()
+    api = _stub_jen_plugin_api()
+    del api  # the calls are not what these checks read
+
+    class _Down:
+        """A connection whose every statement fails the way a database that went away does."""
+
+        def __init__(self, error=None):
+            self.error = error or RuntimeError(2013, "Lost connection to MySQL server during query")
+
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=()):
+            raise self.error
+
+        def close(self):
+            pass
+
+    n._get_db = _Down
+    n._get_kea_db = _Down
+    for name, call, empty in (
+        ("_load_kea", lambda strict: n._load_kea(1, strict=strict), (set(), set(), set(), set())),
+        ("_load_ipam", lambda strict: n._load_ipam(1, strict=strict), ({}, {})),
+        ("_load_devices", lambda strict: n._load_devices(["aa:bb:cc:dd:ee:01"], strict=strict), {}),
+        ("_load_known", lambda strict: n._load_known(strict=strict), {}),
+    ):
+        check(call(False) == empty, f"{name}: a reader still gets the empty answer from a read that failed")
+        try:
+            call(True)
+            raised = None
+        except n._CrossReferenceFailed as e:
+            raised = str(e)
+        check(bool(raised), f"{name}: a scan gets _CrossReferenceFailed naming what could not be read (got {raised!r})")
+    n._get_db = lambda: _Down(RuntimeError(1146, "Table 'jen.ipam_static_entries' doesn't exist"))
+    check(
+        n._load_ipam(1, strict=True) == ({}, {}),
+        "_load_ipam: IPAM Lite not installed (error 1146) is an empty answer for a scan too, not a failure",
+    )
+
+    plugin_api = sys.modules["jen.plugin_api"]
+    seen_cfg = []
+    plugin_api.subnet_context = lambda subnet_id, dhcp4_cfg=None: (
+        seen_cfg.append(dhcp4_cfg)
+        or {"infrastructure": {"10.0.0.1": "gateway"}, "gateways": ["10.0.0.1"], "dns": [], "pools": []}
+    )
+    plugin_api.dhcp4_config = lambda: None
+    try:
+        n._subnet_ctx(1, "10.0.0.0/24", strict=True)
+        raised = None
+    except n._CrossReferenceFailed as e:
+        raised = str(e)
+    check(
+        bool(raised) and "Kea's configuration" in raised and seen_cfg == [],
+        f"_subnet_ctx: Kea not answering is a failed read for a scan, before any context is built (got {raised!r})",
+    )
+    check(
+        n._subnet_ctx(1, "10.0.0.0/24")["gateways"] == ["10.0.0.1"] and seen_cfg == [None],
+        "_subnet_ctx: a reader is given whatever subnet_context answers, as before",
+    )
+    plugin_api.dhcp4_config = lambda: {"subnet4": []}
+    seen_cfg.clear()
+    check(
+        n._subnet_ctx(1, "10.0.0.0/24", strict=True)["gateways"] == ["10.0.0.1"] and seen_cfg == [{"subnet4": []}],
+        "_subnet_ctx: a scan hands subnet_context the very configuration it checked (no second read)",
+    )
+    del plugin_api.dhcp4_config
+    seen_cfg.clear()
+    check(
+        n._subnet_ctx(1, "10.0.0.0/24", strict=True)["gateways"] == ["10.0.0.1"] and seen_cfg == [None],
+        "_subnet_ctx: a Jen with no dhcp4_config to ask is taken at its word",
+    )
+
+    # the whole job: the leased host that used to be stored `unknown` and alerted is neither stored nor announced
+    job_db = FakeDB()
+    sent = []
+    n._get_db = lambda: job_db
+    n._get_kea_db = _Down
+    scans = []
+    n._scan_subnet = lambda cidr: (
+        scans.append(cidr) or {"hosts": [{"ip": "10.0.0.5", "mac": "", "hostname": "leased-host"}]}
+    )
+    n._subnet_ctx = lambda sid, cidr, strict=False: {"gateways": [], "dns": [], "pools": [], "infrastructure": {}}
+    n._alert_new_unknowns = lambda *a, **k: sent.append("alert")
+    n._emit_new_unknowns = lambda *a, **k: sent.append("event")
+    n._run_scan_job(1, "10.0.0.0/24", 31)
+    marks = [prm for sql, prm in job_db.log if "UPDATE nd_scan_jobs SET status=%s" in sql]
+    check(
+        len(marks) == 1
+        and marks[0][0] == "error"
+        and marks[0][3].startswith("Could not read Kea's leases and reservations"),
+        f"_run_scan_job: Kea's database away during a scan is an error job that says what could not be read (got {marks})",
+    )
+    check(
+        not any(sql.startswith(("INSERT INTO nd_scan_results", "DELETE")) for sql, _p in job_db.log) and sent == [],
+        f"_run_scan_job: nothing is stored, nothing is pruned and no alert or event is sent (got {sent})",
+    )
+    check(
+        scans == [],
+        f"_run_scan_job: the read is asked BEFORE nmap runs, so a scan that cannot be judged does not scan (got {scans})",
+    )
+    # Kea answers before the scan and is away after it: the scan ran, and its hosts are still not judged against nothing
+    asked = {"n": 0}
+    real_load_kea = n._load_kea
+
+    def _kea_goes_away(sid, strict=False):
+        asked["n"] += 1
+        if asked["n"] == 1:
+            return set(), set(), set(), set()
+        return real_load_kea(sid, strict=strict)
+
+    n._load_kea = _kea_goes_away
+    job_db = FakeDB()
+    n._get_db = lambda: job_db
+    n._run_scan_job(1, "10.0.0.0/24", 32)
+    marks = [prm for sql, prm in job_db.log if "UPDATE nd_scan_jobs SET status=%s" in sql]
+    check(
+        scans == ["10.0.0.0/24"]
+        and len(marks) == 1
+        and marks[0][0] == "error"
+        and sent == []
+        and not any(sql.startswith("INSERT INTO nd_scan_results") for sql, _p in job_db.log),
+        f"_run_scan_job: Kea going away DURING the scan is the same error, with nothing stored or sent (got {marks}, {sent})",
+    )
+    n._load_kea = real_load_kea
+
+    nt = load_plugin()
+    nt._ip_binary = lambda: "/usr/sbin/ip"
+    nt.subprocess = types.SimpleNamespace(
+        run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+    )
+    net = ipaddress.IPv4Network("10.0.0.0/24")
+    check(nt._neighbour_table(net) == {}, "_neighbour_table: a reader still gets an empty table when `ip` fails")
+    try:
+        nt._neighbour_table(net, strict=True)
+        raised = None
+    except nt._CrossReferenceFailed as e:
+        raised = str(e)
+    check(
+        raised == "the Jen host's neighbor table", f"_neighbour_table: a scan is told the read failed (got {raised!r})"
+    )
+    nt._ip_binary = lambda: None
+    check(
+        nt._neighbour_table(net, strict=True) == {}, "_neighbour_table: no `ip` at all is an empty table, not a failure"
+    )
+
+    # ── 1.3.5 (ND-3): ONE rule for which known-hosts entry covers a host, for the scan and for every reader ───────────
+    by_ip = {("", "10.0.0.5"): "kiosk"}
+    check(
+        n.known_note(by_ip, "aa:bb:cc:dd:ee:05", "10.0.0.5") == "kiosk",
+        "known_note: an address entry covers the host once it has a MAC",
+    )
+    check(
+        n.known_note({("aa:bb:cc:dd:ee:05", ""): ""}, "AA:BB:CC:DD:EE:05", "10.0.0.9") == "",
+        "known_note: a MAC entry with no note is '' (known), not None",
+    )
+    check(
+        n.known_note(by_ip, "aa:bb:cc:dd:ee:05", "10.0.0.6") is None,
+        "known_note: another address and another MAC is not covered",
+    )
+    check(
+        n.known_note({("", ""): "x"}, "", "") is None, "known_note: a host with neither MAC nor address matches nothing"
+    )
+    host = {"ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:05", "hostname": ""}
+    n._vendor = lambda mac, hostname: ("", "", "")
+    scanned = n.classify([host], (set(), set(), set(), set()), {"infrastructure": {}}, ({}, {}), {}, by_ip)[0]
+    read_back = n.apply_known([dict(scanned)], by_ip)[0]
+    check(
+        scanned["status"] == "known" and read_back["status"] == "known" and read_back["rogue"] is False,
+        f"classify and apply_known agree on an address-keyed entry for a host that now has a MAC (scan {scanned['status']}, page {read_back['status']})",
+    )
+
+    forget_db = FakeDB()
+    n._get_db = lambda: forget_db
+    n.current_user.role, n.current_user.all_subnets = "admin", True
+    n.flash = lambda *a, **k: None
+    n.redirect = lambda *a, **k: "back"
+    n.url_for = lambda *a, **k: "/x"
+    n.request = types.SimpleNamespace(form={"ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:05", "action": "forget"})
+    n.mark_known(1)
+    deletes = [(sql, prm) for sql, prm in forget_db.log if sql.startswith("DELETE FROM nd_known_hosts")]
+    check(
+        len(deletes) == 1
+        and "(mac=%s AND ip='') OR (mac='' AND ip=%s) OR (mac=%s AND ip=%s)" in deletes[0][0]
+        and deletes[0][1] == ("aa:bb:cc:dd:ee:05", "10.0.0.5", "aa:bb:cc:dd:ee:05", "10.0.0.5"),
+        f"mark_known: Forget removes every entry that makes the row known, the address-keyed one included (got {deletes})",
+    )
+
+    # ── 1.3.5 (ND-4): an address match is this client's row only when the scan saw no MAC on it ──────────────────────
+    queries = []
+    card_db = FakeDB(lambda sql, params: queries.append((sql, params)) or [])
+    n._get_db = lambda: card_db
+    n._scan_rows_for_client("bb:bb:bb:bb:bb:02", ["10.0.0.50"], {1}, False)
+    sql, params = queries[-1]
+    check(
+        "(r.mac=%s OR (r.ip IN (%s) AND (r.mac='' OR r.mac IS NULL)))" in sql
+        and params == (1, "bb:bb:bb:bb:bb:02", "10.0.0.50"),
+        f"_scan_rows_for_client: with a MAC, a row on its address counts only when that row has no MAC (got {sql!r})",
+    )
+    n._scan_rows_for_client("", ["10.0.0.50"], {1}, False)
+    sql, params = queries[-1]
+    check(
+        "((r.ip IN (%s)))" in sql and "r.mac=''" not in sql and params == (1, "10.0.0.50"),
+        f"_scan_rows_for_client: a client with no MAC is still found by its address alone (got {sql!r})",
+    )
+
+    # ── 1.3.5 (ND-2): the scan-status poll says it is a poll, as in the copy Jen bundles ───────────────────────────────
+    index_page = pathlib.Path(ROOT, "templates", "network_discovery", "index.html").read_text(encoding="utf-8")
+    check(
+        "{ headers: { 'X-Jen-Poll': '1' } }" in index_page,
+        "index.html: the scan-status poll carries X-Jen-Poll, so an open page does not keep a session alive",
+    )
 
     if failures:
         print(f"\n{len(failures)} check(s) failed")

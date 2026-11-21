@@ -25,6 +25,8 @@ The MAC is what makes the cross-reference reliable: a known device whose lease I
 
 Each found host gets one status, first match wins: `lease` (an active Kea lease, by IP or MAC) → `reservation` (a Kea host reservation, this subnet's or a global one) → `infrastructure` (the gateway, DNS servers, the Kea server, the Jen host, network/broadcast — from Jen's subnet context) → `ipam` (an IPAM Lite static/planned entry, when that plugin is installed) → `device` (a device Jen has seen before with no lease right now) → `known` (marked "I know this one") → `unknown`. Only `unknown` alerts. Vendor and device type come from Jen's OUI table.
 
+A scan that cannot read one of those sources stops (since 1.3.5): the job is an error that names the read that failed, nothing is stored and no alert is sent, and the last scan that completed stays the one the next scan is compared with. "IPAM Lite is not installed" and "the Jen host has no `ip` command" are empty answers, not failures. Which known-hosts entry covers a host is one rule for the scan and for every page: an entry for its MAC, for its address, or for the pair.
+
 ## Features
 
 - Per-subnet scan cards showing last scan time, hosts found, unknown count, and the reason if a scan failed

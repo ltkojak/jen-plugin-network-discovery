@@ -126,7 +126,7 @@
         var i = 0;
         var t = setInterval(function() {
             dots.textContent = '.'.repeat(++i % 4 || 1);
-            fetch('/network/discovery/api/scan-status/' + {{ subnet_id|tojson }})
+            fetch('/network/discovery/api/scan-status/' + {{ subnet_id|tojson }}, { headers: { 'X-Jen-Poll': '1' } })
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
                     if (d.status === 'done' || d.status === 'error') {

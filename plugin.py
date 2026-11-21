@@ -317,9 +317,23 @@ def _parse_neighbours(text, network):
     return out
 
 
-def _neighbour_table(network):
-    """Best effort — an empty dict on any failure (no `ip`, Docker with no
-    view of the host's links, a routed subnet with no entries)."""
+class _CrossReferenceFailed(Exception):
+    """v1.3.5 (ND-1) - something a scan is classified against could not be READ. Its text names what, for the job's error.
+
+    Every loader below used to answer a failed read with an empty set, and the scan then classified against "nothing": with
+    the Kea database away for one statement every leased host was `unknown` and a Rogue Device alert went out for it; with
+    Kea's API not answering the gateway and the DNS servers were; with the known list unreadable every host marked known
+    alerted again. The wrong statuses were also stored and became the next scan's baseline. A scan that cannot read what it
+    is judged against is an `error` job: nothing is stored, nothing is sent, and the last good scan stays the baseline."""
+
+
+_NOT_CLASSIFIED = "Could not read {what} - nothing was classified and no alert was sent. The next scan tries again."
+
+
+def _neighbour_table(network, strict=False):
+    """An empty dict when there is nothing to read (no `ip`, Docker with no view of the host's links, a routed subnet with
+    no entries). A read that FAILS (`ip` timed out or exited non-zero) is also an empty dict for a reader, and
+    `_CrossReferenceFailed` for a scan (`strict`): a scan with no MACs calls every device and MAC-keyed known host unknown."""
     ip_bin = _ip_binary()
     if not ip_bin:
         return {}
@@ -327,8 +341,12 @@ def _neighbour_table(network):
         result = subprocess.run([ip_bin, "-4", "neigh", "show"], capture_output=True, text=True, timeout=10)
     except Exception as e:
         logger.warning(f"Network Discovery: could not read the neighbour table: {e}")
+        if strict:
+            raise _CrossReferenceFailed("the Jen host's neighbor table") from e
         return {}
     if result.returncode != 0:
+        if strict:
+            raise _CrossReferenceFailed("the Jen host's neighbor table")
         return {}
     return _parse_neighbours(result.stdout, network)
 
@@ -375,23 +393,46 @@ def _scan_subnet(cidr):
         return {"error": f"nmap exited with status {result.returncode} — see the Jen log"}
 
     hosts = _parse_nmap_greppable(result.stdout)
-    return {"hosts": _merge_neighbours(hosts, _neighbour_table(network))}
+    try:
+        neighbours = _neighbour_table(network, strict=True)
+    except _CrossReferenceFailed as e:
+        return {"error": _NOT_CLASSIFIED.format(what=e)}
+    return {"hosts": _merge_neighbours(hosts, neighbours)}
 
 
 # ── What Jen knows ────────────────────────────────────────────────────────────
 
 
-def _subnet_ctx(subnet_id, cidr):
+def _subnet_ctx(subnet_id, cidr, strict=False):
     """Jen's subnet_context (5.30.0) — gateway, DNS, Kea/Jen hosts — else
-    just network/broadcast."""
+    just network/broadcast.
+
+    v1.3.5 (ND-1) - for a scan (`strict`) Kea's configuration is read first and handed to `subnet_context`. Jen's
+    `dhcp4_config()` answers None when Kea did not answer, and `subnet_context` then returns a context with no gateway and
+    no DNS server, which is how those two became "new unknown devices". A Jen that has no `dhcp4_config` to ask is taken
+    at its word, as before."""
     try:
         from jen.plugin_api import subnet_context
 
-        ctx = subnet_context(subnet_id)
+        cfg = None
+        if strict:
+            try:
+                from jen.plugin_api import dhcp4_config
+            except ImportError:
+                dhcp4_config = None
+            if dhcp4_config is not None:
+                cfg = dhcp4_config()
+                if cfg is None:
+                    raise _CrossReferenceFailed("Kea's configuration (this subnet's gateway and DNS servers)")
+        ctx = subnet_context(subnet_id, dhcp4_cfg=cfg) if cfg is not None else subnet_context(subnet_id)
         if ctx:
             return ctx
+    except _CrossReferenceFailed:
+        raise
     except Exception as e:
         logger.warning(f"Network Discovery: subnet_context unavailable: {e}")
+        if strict:
+            raise _CrossReferenceFailed("this subnet's gateway and DNS servers") from e
     infra = {}
     try:
         network = ipaddress.IPv4Network(cidr, strict=False)
@@ -403,10 +444,11 @@ def _subnet_ctx(subnet_id, cidr):
     return {"infrastructure": infra, "gateways": [], "dns": [], "pools": []}
 
 
-def _load_kea(subnet_id):
+def _load_kea(subnet_id, strict=False):
     """(lease_ips, lease_macs, res_ips, res_macs) — reservations include
     global ones (dhcp4_subnet_id 0/NULL), which the old code missed.
-    Only a type-0 (hw-address) identifier is a MAC."""
+    Only a type-0 (hw-address) identifier is a MAC. A read that fails is
+    four empty sets for a reader and `_CrossReferenceFailed` for a scan."""
     lease_ips, lease_macs, res_ips, res_macs = set(), set(), set(), set()
     kdb = None
     try:
@@ -434,16 +476,23 @@ def _load_kea(subnet_id):
                     res_macs.add(_hex_to_mac(row["ident_hex"]))
     except Exception as e:
         logger.error(f"Network Discovery: Kea cross-reference error: {e}")
+        if strict:
+            raise _CrossReferenceFailed("Kea's leases and reservations") from e
     finally:
         if kdb:
             kdb.close()
     return lease_ips, lease_macs, res_ips, res_macs
 
 
-def _load_ipam(subnet_id):
+_NO_SUCH_TABLE = 1146  # MySQL / MariaDB: the table does not exist
+
+
+def _load_ipam(subnet_id, strict=False):
     """(ips, macs) of IPAM Lite static/planned entries for this subnet —
     read directly from its table when the plugin is installed; ({} , {})
-    when it isn't (the table doesn't exist)."""
+    when it isn't (the table doesn't exist). For a scan (`strict`) any
+    OTHER failure is `_CrossReferenceFailed`: "IPAM Lite is not installed"
+    is an empty answer, "the database did not answer" is not."""
     ips, macs = {}, {}
     db = None
     try:
@@ -459,15 +508,19 @@ def _load_ipam(subnet_id):
                 ips[row["ip"]] = label
                 if row.get("mac"):
                     macs[row["mac"].lower()] = label
-    except Exception:
-        pass  # IPAM Lite not installed, or its table not yet migrated
+    except Exception as e:
+        # IPAM Lite not installed, or its table not yet migrated: an empty answer. Anything else is a read that failed.
+        if not (e.args and e.args[0] == _NO_SUCH_TABLE):
+            logger.warning(f"Network Discovery: IPAM cross-reference error: {e}")
+            if strict:
+                raise _CrossReferenceFailed("IPAM Lite's entries") from e
     finally:
         if db:
             db.close()
     return ips, macs
 
 
-def _load_devices(macs):
+def _load_devices(macs, strict=False):
     """{mac: {name, owner, manufacturer, device_type, icon}} from Jen's
     devices table. One fixed statement per MAC."""
     out = {}
@@ -495,10 +548,27 @@ def _load_devices(macs):
                     }
     except Exception as e:
         logger.warning(f"Network Discovery: devices lookup failed: {e}")
+        if strict:
+            raise _CrossReferenceFailed("Jen's devices table") from e
     finally:
         if db:
             db.close()
     return out
+
+
+def known_note(known, mac, ip):
+    """Pure: the note of the known-hosts entry that covers this host ("" when it has none), or None when no entry does.
+
+    v1.3.5 (ND-3) - the ONE rule, used by the scan (`classify`) and by every reader (`apply_known`). They had two: the scan
+    took an entry keyed on the MAC, on the address, or on both; the readers looked the host up by its MAC alone when it had
+    one. A host marked known while the scan saw no MAC (a routed subnet), and later seen with one, was stored `known` by the
+    scan, so it never alerted, and shown `unknown` on the page, the card, the CSV and the investigation card. `known` is
+    `_load_known()`'s `{(mac, ip): note}`."""
+    mac, ip = (mac or "").lower(), ip or ""
+    notes = [known[key] for key in ((mac, ""), ("", ip), (mac, ip)) if (key[0] or key[1]) and key in known]
+    if not notes:
+        return None
+    return next((n for n in notes if n), "")
 
 
 def apply_known(rows, known):
@@ -511,14 +581,13 @@ def apply_known(rows, known):
     scanned rows now re-derives 'known'/'unknown' from the list as it stands right now instead of trusting
     what a past scan (or a past mark_known UPDATE) wrote; every other status (a lease, a reservation, an
     infrastructure address, an IPAM entry, a device) is untouched, since the known list has no say over
-    those. `known` is `_load_known()`'s own `{(mac, ip): note}` shape — a MAC-keyed host is looked up by
-    MAC alone (mac takes precedence over ip, the same rule `mark_known` itself applies when saving)."""
+    those. `known` is `_load_known()`'s own `{(mac, ip): note}` shape; which entry covers a host is
+    `known_note`'s rule, the same one the scan uses (v1.3.5)."""
     out = []
     for row in rows:
         row = dict(row)
         if row.get("status") in ("known", "unknown"):
-            key = (row.get("mac") or "", "") if row.get("mac") else ("", row.get("ip") or "")
-            note = known.get(key)
+            note = known_note(known, row.get("mac"), row.get("ip"))
             if note is not None:
                 row["status"], row["rogue"], row["label"] = "known", False, (note or row.get("label") or "")
             else:
@@ -527,7 +596,7 @@ def apply_known(rows, known):
     return out
 
 
-def _load_known():
+def _load_known(strict=False):
     """{(mac or '', ip or ''): note} — the operator's "I know this one" list."""
     out = {}
     db = None
@@ -539,6 +608,8 @@ def _load_known():
                 out[((row.get("mac") or "").lower(), row.get("ip") or "")] = row.get("note") or ""
     except Exception as e:
         logger.warning(f"Network Discovery: known-hosts read failed: {e}")
+        if strict:
+            raise _CrossReferenceFailed("the known-hosts list") from e
     finally:
         if db:
             db.close()
@@ -589,9 +660,9 @@ def classify(hosts, kea, ctx, ipam, devices, known):
         elif mac and mac in devices:
             status = "device"
             label = devices[mac].get("name") or ""
-        elif (mac, "") in known or ("", ip) in known or (mac, ip) in known:
+        elif known_note(known, mac, ip) is not None:
             status = "known"
-            label = known.get((mac, "")) or known.get(("", ip)) or known.get((mac, ip)) or ""
+            label = known_note(known, mac, ip)
         else:
             status = "unknown"
         manufacturer, device_type, icon = _vendor(mac, hostname)
@@ -723,6 +794,19 @@ def _reserve_scan(subnet_id):
             db.close()
 
 
+def _cross_reference(subnet_id, cidr, found):
+    """`(ctx, kea, ipam, devices, known)` - everything the hosts of a scan are judged against, read so that a failure is
+    `_CrossReferenceFailed` and never an empty answer. Read again AFTER the scan for the judging itself, so that a lease
+    handed out while nmap ran is in it."""
+    return (
+        _subnet_ctx(subnet_id, cidr, strict=True),
+        _load_kea(subnet_id, strict=True),
+        _load_ipam(subnet_id, strict=True),
+        _load_devices(sorted({h["mac"] for h in found if h.get("mac")}), strict=True),
+        _load_known(strict=True),
+    )
+
+
 def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
     """Run a job already queued as job_id (see _queue_scan_job) once the
     caller holds _scan_lock. Marks it 'running' — resetting started_at so
@@ -734,6 +818,15 @@ def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
             cur.execute("UPDATE nd_scan_jobs SET status='running', started_at=UTC_TIMESTAMP() WHERE id=%s", (job_id,))
         db.commit()
 
+        # v1.3.5 (ND-1) - asked once BEFORE nmap runs: a scheduled scan whose last job is an error is due again on the next
+        # tick, and with Kea away that would be a scan of the whole subnet every tick, only to be thrown away.
+        try:
+            _cross_reference(subnet_id, cidr, [])
+        except _CrossReferenceFailed as e:
+            logger.error(f"Network Discovery: scan of {cidr} not started: could not read {e}")
+            _mark_job(db, job_id, "error", _NOT_CLASSIFIED.format(what=e))
+            return job_id
+
         result = _scan_subnet(cidr)
         if "error" in result:
             logger.error(f"Network Discovery: scan of {cidr} failed: {result['error']}")
@@ -741,11 +834,15 @@ def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
             return job_id
 
         found = result["hosts"]
-        ctx = _subnet_ctx(subnet_id, cidr)
-        kea = _load_kea(subnet_id)
-        ipam = _load_ipam(subnet_id)
-        devices = _load_devices(sorted({h["mac"] for h in found if h.get("mac")}))
-        hosts = classify(found, kea, ctx, ipam, devices, _load_known())
+        try:
+            ctx, kea, ipam, devices, known = _cross_reference(subnet_id, cidr, found)
+        except _CrossReferenceFailed as e:
+            # v1.3.5 (ND-1) - nothing is classified against a read that failed: no row is stored, no alert is sent, and the
+            # last scan that completed stays the one the next scan is compared with.
+            logger.error(f"Network Discovery: scan of {cidr} not classified: could not read {e}")
+            _mark_job(db, job_id, "error", _NOT_CLASSIFIED.format(what=e))
+            return job_id
+        hosts = classify(found, kea, ctx, ipam, devices, known)
         unknown_count = sum(1 for h in hosts if h["status"] == "unknown")
 
         with db.cursor() as cur:
@@ -1375,7 +1472,13 @@ def mark_known(subnet_id):
         db = _get_db()
         with db.cursor() as cur:
             if action == "forget":
-                cur.execute("DELETE FROM nd_known_hosts WHERE mac=%s AND ip=%s", (key_mac, key_ip))
+                # v1.3.5 (ND-3) - Forget removes every entry that makes this host known (`known_note`'s three keys), not
+                # only the one keyed the way a NEW entry would be: a host marked known by its address before the scan
+                # could see its MAC could not be forgotten from its own row, because the form posts the MAC.
+                cur.execute(
+                    "DELETE FROM nd_known_hosts WHERE (mac=%s AND ip='') OR (mac='' AND ip=%s) OR (mac=%s AND ip=%s)",
+                    (mac, ip, mac, ip),
+                )
             else:
                 cur.execute(
                     "INSERT INTO nd_known_hosts (mac, ip, note, added_by) VALUES (%s, %s, %s, %s) "
@@ -1591,12 +1694,17 @@ def _scan_rows_for_client(mac, addresses, accessible_subnet_ids, all_subnets):
     if scope is None:
         return []
     scope_clause, scope_params = scope
+    # v1.3.5 (ND-4) - a row found on one of this client's ADDRESSES is this client's only when the scan saw no MAC on it (or
+    # the client has none to compare). An address match alone attributed another device's row: the last scan saw an old
+    # phone on 10.0.0.50, that lease ended, and the client that leases 10.0.0.50 now was shown the phone's vendor and name,
+    # as a warning when the phone was unknown.
     identity, identity_params = [], []
     if mac:
         identity.append("r.mac=%s")
         identity_params.append(mac)
     if addresses:
-        identity.append(f"r.ip IN ({in_placeholders(addresses)})")
+        only_without_mac = " AND (r.mac='' OR r.mac IS NULL)" if mac else ""
+        identity.append(f"(r.ip IN ({in_placeholders(addresses)}){only_without_mac})")
         identity_params.extend(addresses)
     if not identity:
         return []

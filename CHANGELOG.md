@@ -1,5 +1,29 @@
 # Network Discovery Plugin — Changelog
 
+## [1.3.5] - 2026-11-20
+
+Four fixes from the audit of 1.3.4 (ND-1 to ND-4). `requires_jen` (5.68.0), `plugin_api` (3) and every migration are unchanged.
+
+### Fixed: a scan that cannot read what it is judged against is an error, not a list of rogue devices (ND-1)
+
+A found host is named by cross-reference: Kea's leases and reservations, the subnet's gateway and DNS servers from Kea's configuration, IPAM Lite's entries, Jen's devices, the known-hosts list, and the Jen host's neighbor table for the MAC. Every one of those reads answered a failure with "nothing there", and the scan went on. With the Kea database away for one statement, every leased host that Jen has no device record for was stored as `unknown` and a Rogue Device alert was sent for it. With Kea's API not answering, the gateway and the DNS servers were. With the known list unreadable, every host you had marked known alerted again. With `ip neigh` timing out once, every device was seen without its MAC, and the scan after it alerted a second time. The wrong statuses were also stored and became what the next scan was compared with.
+
+A scan now stops when one of those reads fails. They are asked once before nmap runs, so a scan that cannot be judged does not scan the subnet at all, and again after it for the judging itself. The job is an error that says which read it was, for example *Could not read Kea's leases and reservations - nothing was classified and no alert was sent. The next scan tries again.* Nothing is stored, nothing is pruned, no alert and no Timeline event is sent, and the last scan that completed stays the one the next scan is compared with. Two answers are still "nothing there" and not a failure: IPAM Lite is not installed (its table does not exist), and the Jen host has no `ip` command at all.
+
+One consequence to know: while Kea's API does not answer, scans of every subnet end in that error instead of producing results without a gateway.
+
+### Fixed: the page and the scan agree on which hosts are known (ND-3)
+
+A host marked known while the scan could not see its MAC (a routed subnet) is stored by its address. Once a scan did see its MAC, the scan still treated it as known, so it never alerted, while the results page, the card on the index page, the CSV and the Investigation card looked the host up by MAC alone and showed it as unknown, with a Known button instead of Forget. One function, `known_note`, is now the rule for both: an entry for the MAC, or for the address, or for the pair. Forget removes every entry that makes that row known, so an address-keyed entry can be forgotten from the row of a host that now has a MAC.
+
+### Fixed: the Investigation card no longer shows another device's scan row (ND-4)
+
+The card looked for scan rows with the client's MAC or on any of its addresses. A scan can be up to a week old: when it saw an old phone on 10.0.0.50 and a different client leases that address now, the card for the new client showed the phone's vendor and name, as a warning when the phone was unknown. A row found by address now counts only when the scan saw no MAC on it, or the client being investigated has none.
+
+### Fixed: the scan-status poll carries Jen's poll marker, as in the copy Jen bundles (ND-2)
+
+Jen's bundled copy of the index page marks its three-second status poll with `X-Jen-Poll`, so an open page with a scan running does not keep a session alive. That line was never carried into this repository, so an install from the registry lacked it. The two are the same file again.
+
 ## [1.3.4] - 2026-10-12
 
 A viewer is no longer shown controls the plugin will refuse. `requires_jen` (5.68.0), `plugin_api` (3) and every migration are unchanged, and no route, query or stored value changes.
