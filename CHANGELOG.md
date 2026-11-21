@@ -1,5 +1,23 @@
 # Network Discovery Plugin — Changelog
 
+## [1.3.6] - 2026-11-21
+
+One fix and one limit written down, both from the executing pass on Jen 7.2.0-beta.4 (BG3, BG5). `requires_jen` (5.68.0), `plugin_api` (3) and every migration are unchanged.
+
+### Fixed: a scan that cannot be judged does not run nmap, for every read and not for four of the six (BG3)
+
+1.3.5 said of the reads a scan is judged against: "They are asked once before nmap runs, so a scan that cannot be judged does not scan the subnet at all". That was true of four of them. The check before nmap asked for Jen's devices with no hosts in hand, and the devices table is asked one statement per MAC, so with no MAC it was not asked at all. The Jen host's neighbor table was read only after nmap had finished. With Jen's devices table unreadable, or with `ip neigh` failing or timing out, nmap swept the whole subnet, the job then ended as the error it should have started with, and the sweep was thrown away. A scheduled scan whose last job is an error is due again on the next tick, so that was a sweep of the subnet every 30 minutes for as long as the read kept failing. Nothing wrong was stored or sent in that time.
+
+The check before nmap now asks all six: the four it asked, then one statement against the devices table, then the neighbor table. When one fails, nmap is not run and the job is the same error as before, with the same name for the read whether it failed before nmap or after it, for example *Could not read Jen's devices table - nothing was classified and no alert was sent. The next scan tries again.* The reads after nmap are unchanged, because a lease handed out or a neighbor learned while nmap ran has to be in the judging. A Jen host with no `ip` command at all is still an empty neighbor table and not a failure, before nmap as after it.
+
+### Known limit: IPAM Lite older than 1.4.0 (BG5)
+
+Not changed, and now written down. A scan needs IPAM Lite 1.4.0 or later when IPAM Lite is installed; with an older one, or with its table damaged, each scan ends as an error job that names IPAM Lite's entries, and nothing is alerted. Only a missing table (MySQL error 1146) is read as "IPAM Lite is not installed". A table without the `entry_status` column, or a view that cannot be read, is a read that failed, and a scan does not guess what such a table would have said. The IPAM Lite that Jen bundles always has the column.
+
+### Tested
+
+`tools/test_plugin.py` runs the real `_run_scan_job` with the devices table failing, with `ip` exiting non-zero and with `ip` timing out, and counts the nmap runs: none, where 1.3.5 ran one each time. With every read answering nmap runs once and the job completes; with no `ip` command the scan still runs. The error text for the devices table is compared between the check before nmap and the one after it.
+
 ## [1.3.5] - 2026-11-20
 
 Four fixes from the audit of 1.3.4 (ND-1 to ND-4). `requires_jen` (5.68.0), `plugin_api` (3) and every migration are unchanged.

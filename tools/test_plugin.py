@@ -167,6 +167,9 @@ def load_plugin():
     spec = importlib.util.spec_from_file_location("nd_plugin", os.path.join(ROOT, "plugin.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    # 1.3.6 (BG3): a scan job reads the neighbor table before nmap. No check runs the `ip` of the machine the harness is
+    # on: "no `ip` command" is the default here, and the checks that are about `ip` put their own stand-in back.
+    mod._ip_binary = lambda: None
     return mod
 
 
@@ -1456,6 +1459,124 @@ def main():
     check(
         "{ headers: { 'X-Jen-Poll': '1' } }" in index_page,
         "index.html: the scan-status poll carries X-Jen-Poll, so an open page does not keep a session alive",
+    )
+
+    # ── 1.3.6 (BG3): the check before nmap asks the devices table and the neighbor table too ──────────────────────────
+    # The real `_run_scan_job`, `_preflight`, `_devices_readable`, `_scan_subnet` and `_neighbour_table`. Stood in: the
+    # database, and `subprocess.run` (it answers for nmap and for `ip`, and records which of the two was run).
+    import subprocess as real_subprocess
+
+    b = load_plugin()
+    b._subnet_ctx = lambda sid, cidr, strict=False: {"gateways": [], "dns": [], "pools": [], "infrastructure": {}}
+    b._load_kea = lambda sid, strict=False: (set(), set(), set(), set())
+    b._load_ipam = lambda sid, strict=False: ({}, {})
+    b._load_known = lambda strict=False: {}
+    b._vendor = lambda mac, hostname: ("", "", "")
+    b._alert_new_unknowns = lambda *a, **k: None
+    b._emit_new_unknowns = lambda *a, **k: None
+    b._nmap_available = lambda: True
+    neigh_line = "10.0.0.5 dev eth0 lladdr aa:bb:cc:dd:ee:05 REACHABLE\n"
+
+    def _bg3_job(job_id, ip_binary="/usr/sbin/ip", ip_answer=None, fail_on=None, cidr="10.0.0.0/24"):
+        """Run one scan job; `(runs, marks, inserts, db)`: the programs run in order, the job marks, the rows stored."""
+        runs = []
+
+        def _run(argv, **kwargs):
+            runs.append("nmap" if argv[0] == "nmap" else "ip")
+            if argv[0] == "nmap":
+                return types.SimpleNamespace(returncode=0, stdout="Host: 10.0.0.5 (printer)\tStatus: Up\n", stderr="")
+            if ip_answer is not None:
+                return ip_answer(argv)
+            return types.SimpleNamespace(returncode=0, stdout=neigh_line, stderr="")
+
+        b.subprocess = types.SimpleNamespace(run=_run, TimeoutExpired=real_subprocess.TimeoutExpired)
+        b._ip_binary = lambda: ip_binary
+        bdb = FakeDB(fail_on=fail_on)
+        b._get_db = lambda: bdb
+        b._run_scan_job(1, cidr, job_id)
+        marks = [(prm[0], prm[3]) for sql, prm in bdb.log if "UPDATE nd_scan_jobs SET status=%s" in sql]
+        inserts = [prm for sql, prm in bdb.log if sql.startswith("INSERT INTO nd_scan_results")]
+        return runs, marks, inserts, bdb
+
+    devices_error = b._NOT_CLASSIFIED.format(what="Jen's devices table")
+    neighbor_error = b._NOT_CLASSIFIED.format(what="the Jen host's neighbor table")
+
+    runs, marks, inserts, bdb = _bg3_job(41, fail_on="FROM devices")
+    check(
+        runs.count("nmap") == 0 and marks == [("error", devices_error)] and inserts == [],
+        f"_run_scan_job: Jen's devices table unreadable is an error job and nmap is NOT run (got {runs}, {marks})",
+    )
+    check(
+        [sql for sql, _p in bdb.log if "FROM devices" in sql] == ["SELECT mac FROM devices LIMIT 1"],
+        "_devices_readable: the devices table is asked once before nmap, with one fixed statement",
+    )
+    early_devices = marks
+
+    def _ip_exits_1(argv):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    runs, marks, inserts, bdb = _bg3_job(42, ip_answer=_ip_exits_1)
+    check(
+        runs == ["ip"] and marks == [("error", neighbor_error)] and inserts == [],
+        f"_run_scan_job: `ip neigh` exiting non-zero is an error job and nmap is NOT run (got {runs}, {marks})",
+    )
+
+    def _ip_times_out(argv):
+        raise real_subprocess.TimeoutExpired(argv, 10)
+
+    runs, marks, inserts, bdb = _bg3_job(43, ip_answer=_ip_times_out)
+    check(
+        runs == ["ip"] and marks == [("error", neighbor_error)] and inserts == [],
+        f"_run_scan_job: `ip neigh` timing out is an error job and nmap is NOT run (got {runs}, {marks})",
+    )
+
+    runs, marks, inserts, bdb = _bg3_job(44)
+    check(
+        runs == ["ip", "nmap", "ip"]
+        and [m[0] for m in marks] == ["done"]
+        and [(prm[1], prm[2]) for prm in inserts] == [("10.0.0.5", "aa:bb:cc:dd:ee:05")],
+        f"_run_scan_job: with every read answering nmap runs once and the job completes as before (got {runs}, {marks})",
+    )
+    check(
+        [sql for sql, _p in bdb.log if "FROM devices" in sql][0] == "SELECT mac FROM devices LIMIT 1"
+        and len([sql for sql, _p in bdb.log if "FROM devices WHERE mac=%s" in sql]) == 1,
+        "_run_scan_job: the devices table is asked before nmap and again, for the MAC found, after it",
+    )
+
+    runs, marks, inserts, bdb = _bg3_job(45, ip_binary=None)
+    check(
+        runs == ["nmap"]
+        and [m[0] for m in marks] == ["done"]
+        and [(prm[1], prm[2]) for prm in inserts] == [("10.0.0.5", "")],
+        f"_run_scan_job: a Jen host with no `ip` command still scans, before nmap as after it (got {runs}, {marks})",
+    )
+
+    runs, marks, inserts, bdb = _bg3_job(46, fail_on="FROM devices WHERE mac=%s")
+    check(
+        runs.count("nmap") == 1 and marks == [("error", devices_error)] and marks == early_devices and inserts == [],
+        f"_run_scan_job: the devices table failing AFTER nmap is the same error text as before nmap (got {marks})",
+    )
+
+    runs, marks, inserts, bdb = _bg3_job(47, cidr="not-a-subnet")
+    check(
+        runs == [] and marks == [("error", "Invalid subnet CIDR: not-a-subnet")],
+        f"_preflight: a CIDR that does not parse is still `_scan_subnet`'s error to report (got {runs}, {marks})",
+    )
+
+    try:
+        b._get_db = lambda: FakeDB(fail_on="FROM devices")
+        b._devices_readable()
+        raised = None
+    except b._CrossReferenceFailed as e:
+        raised = str(e)
+    try:
+        b._load_devices(["aa:bb:cc:dd:ee:05"], strict=True)
+        raised_loader = None
+    except b._CrossReferenceFailed as e:
+        raised_loader = str(e)
+    check(
+        raised == "Jen's devices table" and raised == raised_loader,
+        f"_devices_readable: a failure has the name `_load_devices` gives it (got {raised!r}, {raised_loader!r})",
     )
 
     if failures:

@@ -807,6 +807,39 @@ def _cross_reference(subnet_id, cidr, found):
     )
 
 
+def _devices_readable():
+    """v1.3.6 (BG3) - ask Jen's devices table once, with no MAC in hand. `_load_devices` asks one statement per MAC, so with
+    no hosts found yet it asks nothing; this is the same table and a column it reads, and a failure has the same name."""
+    db = None
+    try:
+        db = _get_db()
+        with db.cursor() as cur:
+            cur.execute("SELECT mac FROM devices LIMIT 1")
+            cur.fetchone()
+    except Exception as e:
+        logger.warning(f"Network Discovery: devices lookup failed: {e}")
+        raise _CrossReferenceFailed("Jen's devices table") from e
+    finally:
+        if db:
+            db.close()
+
+
+def _preflight(subnet_id, cidr):
+    """v1.3.6 (BG3) - every read a scan is judged against, asked once BEFORE nmap runs; a failure is `_CrossReferenceFailed`.
+
+    1.3.5 asked `_cross_reference(subnet_id, cidr, [])` here. With no hosts that never touches the devices table, and the
+    neighbor table was read only after nmap, inside `_scan_subnet`. With either of the two unreadable, nmap scanned the
+    whole subnet on every due tick and the result was thrown away. A `cidr` that does not parse is `_scan_subnet`'s to
+    report, as before, and no `ip` command at all is still an empty table and not a failure."""
+    _cross_reference(subnet_id, cidr, [])
+    _devices_readable()
+    try:
+        network = ipaddress.IPv4Network(cidr, strict=False)
+    except ValueError:
+        return
+    _neighbour_table(network, strict=True)
+
+
 def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
     """Run a job already queued as job_id (see _queue_scan_job) once the
     caller holds _scan_lock. Marks it 'running' — resetting started_at so
@@ -820,8 +853,9 @@ def _run_scan_job(subnet_id, cidr, job_id, trigger="manual"):
 
         # v1.3.5 (ND-1) - asked once BEFORE nmap runs: a scheduled scan whose last job is an error is due again on the next
         # tick, and with Kea away that would be a scan of the whole subnet every tick, only to be thrown away.
+        # v1.3.6 (BG3) - `_preflight` also asks the devices table and the neighbor table, which that call left out.
         try:
-            _cross_reference(subnet_id, cidr, [])
+            _preflight(subnet_id, cidr)
         except _CrossReferenceFailed as e:
             logger.error(f"Network Discovery: scan of {cidr} not started: could not read {e}")
             _mark_job(db, job_id, "error", _NOT_CLASSIFIED.format(what=e))
