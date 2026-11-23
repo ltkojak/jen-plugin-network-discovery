@@ -7,7 +7,7 @@ Scan your subnets and account for every device on them. Finds every live host on
 ## Requirements
 
 - [Jen](https://github.com/ltkojak/jen-kea) v5.68.0 or later (v1.2.x runs on 5.65.10+)
-- `nmap` on the Jen host — Settings → Plugins offers an **Install nmap** button on a systemd host (through Jen's root-run plugin service); elsewhere:
+- `nmap` on the Jen host. Jen's Docker image already has it. On a systemd host Settings → Plugins offers a superadmin an **Install nmap** button (through Jen's root-run plugin service). On any other host that page shows the command and you run it yourself:
   ```bash
   sudo apt install nmap
   ```
@@ -29,9 +29,9 @@ A scan that cannot read one of those sources stops (since 1.3.5): the job is an 
 
 ## Features
 
-- Per-subnet scan cards showing last scan time, hosts found, unknown count, and the reason if a scan failed
+- Per-subnet scan cards with **Scan Now** and **View Results** at the right of each card's header (since 1.3.7), the last scan's time and host count under them, the unknown count, and the reason if a scan failed. Until a subnet has been scanned the page opens with a **Getting started** card: the first step, what Discovery then does by itself, and where its alert is set
 - Manual scan per subnet (background, auto-refreshing) and **scheduled scans** (superadmin; every 6/12/24 h or weekly, through Jen's periodic-job hook); a second scan of a subnet already mid-scan is refused; subnets larger than a /20 are refused with a reason and the nmap timeout scales with the subnet
-- Results page: IP, hostname/label, vendor, MAC, status (filter by any), what changed since the previous scan, CSV export; per host: **Known** (never alert again, with a note; administrators who can see every subnet), **create reservation** (prefilled), **add IPAM entry**
+- Results page: IP, hostname/label, vendor, MAC, status (filter by any), what changed since the previous scan, CSV export, its own **Scan Now** button, and one link back to the Discovery page above the title; per host: **Mark Known** (never alert again, with a note; administrators who can see every subnet), **create reservation** (prefilled), **add IPAM entry**
 - Keeps the last 3 scans per subnet
 - Fires its own "Rogue Device" alert (opt a channel into it under Settings → Alerts) — only for *unknown* hosts the previous scan hadn't seen, compared by MAC so an IP hop doesn't re-alert; the alert lists hostname, vendor and MAC. A new unknown also writes a `discovery.unknown` event to Jen's Timeline
 - Discovered hosts show up in Jen's global search by MAC, IP, hostname, label or vendor, with when they were last seen

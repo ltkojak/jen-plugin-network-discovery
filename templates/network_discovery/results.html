@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% from '_investigate.html' import investigate_link %}
 {% block title %}Discovery Results — {{ subnet.name }}{% endblock %}
+{% block content_class %}content--wide{% endblock %}
 {% block content %}
+<a class="back-link" href="{{ url_for('network_discovery.index') }}">&larr; Network Discovery</a>
 
 <div class="page-header nd-1bcfaf">
     <div>
@@ -9,12 +11,11 @@
         <p>{{ subnet.cidr }}{% if job %} · Scanned {{ job.finished_at | utcfmt if job.finished_at else 'in progress' }}{% endif %}</p>
     </div>
     <div class="nd-3de8f9">
-        <a href="{{ url_for('network_discovery.index') }}" class="btn btn-secondary">← Back</a>
-        {% if job %}<a href="{{ url_for('network_discovery.export_results', subnet_id=subnet_id) }}" class="btn btn-secondary">{{ icon("download") }} CSV</a>{% endif %}
+        {% if job and hosts %}<a href="{{ url_for('network_discovery.export_results', subnet_id=subnet_id) }}" class="btn btn-secondary">{{ icon("download") }} Export CSV</a>{% endif %}
         {% if can_write %}
         <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-primary">{{ icon("refresh-cw") }} Re-scan</button>
+            <button type="submit" class="btn btn-primary">{{ icon("search") }} Scan Now</button>
         </form>
         {% endif %}
     </div>
@@ -24,6 +25,8 @@
 /* v1.2.0 — static declarations moved off individual elements; see
    jen-plugin-ipam's templates for the same convention (no shared
    stylesheet hook exists for a plugin page). */
+/* v1.3.7 - the one way back to the Discovery page, above the title */
+.back-link { display: inline-block; margin-bottom: 8px; font-size: 13px; }
 .nd-10bc68{font-size:28px;font-weight:700;color:var(--primary)}
 .nd-1bcfaf{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
 .nd-260fab{display:flex;gap:28px;flex-wrap:wrap}
@@ -52,7 +55,7 @@
 
 {% if not job %}
 <div class="card nd-c92bea">
-    No scan data yet. Run a scan from the Discovery page.
+    {% if can_write %}No scan data yet. Press Scan Now to run the first scan.{% else %}No scan data yet.{% endif %}
 </div>
 {% else %}
 
@@ -132,13 +135,13 @@
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="ip" value="{{ h.ip }}"><input type="hidden" name="mac" value="{{ h.mac }}">
                     <input type="text" name="note" maxlength="200" placeholder="note" class="nd-a0c2d8">
-                    <button type="submit" class="btn btn-sm btn-secondary" title="Never alert on this again">{{ icon("circle-check") }} Known</button>
+                    <button type="submit" class="btn btn-sm btn-secondary" title="Never alert on this again">{{ icon("circle-check") }} Mark Known</button>
                 </form>
                 {% elif h.status == 'known' and can_change_known %}
                 <form method="POST" action="{{ url_for('network_discovery.mark_known', subnet_id=subnet_id) }}" class="nd-cccfa4">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" name="ip" value="{{ h.ip }}"><input type="hidden" name="mac" value="{{ h.mac }}"><input type="hidden" name="action" value="forget">
-                    <button type="submit" class="btn btn-sm btn-secondary" title="Count it as unknown again">Forget</button>
+                    <button type="submit" class="btn btn-sm btn-secondary" title="Count it as unknown again">Forget Host</button>
                 </form>
                 {% endif %}
                 {% if can_write and h.status in ('unknown', 'known', 'device', 'ipam') %}

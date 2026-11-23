@@ -5,7 +5,7 @@
 <div class="page-header nd-1bcfaf">
     <div>
         <h1>{{ icon("search", "ico-lg") }} Network Discovery</h1>
-        <p>Scan subnets and account for every device on them — Kea, infrastructure, IPAM, the devices Jen has seen — before calling anything unknown.</p>
+        <p>Scans a subnet, matches every host it finds against what Jen already knows, and reports the ones nothing accounts for as unknown.</p>
     </div>
 </div>
 
@@ -17,32 +17,41 @@
 .nd-115a53{width:auto;font-size:12px}
 .nd-1bcfaf{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
 .nd-3244fd{margin-top:10px;font-size:11px;color:var(--text-muted)}
-.nd-58703f{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .nd-61255d{display:inline;margin-left:10px}
 .nd-6ae05f{font-weight:600;font-size:14px}
 .nd-6cb285{font-size:12px}
 .nd-749148{font-size:11px;color:var(--text-muted)}
 .nd-775b16{display:flex;gap:20px;margin-bottom:12px}
 .nd-796b22{margin:0;color:var(--text-muted)}
-.nd-7971e4{font-size:22px;font-weight:700;color:var(--primary)}
 .nd-834227{margin-top:10px;display:flex;gap:6px;align-items:center;font-size:12px}
 .nd-865c33{font-size:12px;color:var(--text-muted)}
 .nd-91a870{text-align:center}
-.nd-a6ea14{font-size:11px;color:var(--success)}
 .nd-b0ad2a{display:inline;margin-left:6px}
 .nd-b8b1bc{font-size:12px;color:var(--text-muted);margin-bottom:12px}
 .nd-c663e5{font-size:12px;color:var(--danger);margin-bottom:12px}
 .nd-c92bea{text-align:center;padding:32px;color:var(--text-muted)}
 .nd-cccfa4{display:inline}
 .nd-cd5a1e{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
+/* v1.3.7 - a card brings a 16px bottom margin of its own (Jen's .card), which on top of the grid's row gap made the rows
+   32px apart and the columns 16px. The grid's gap is the one gap. */
+.nd-cd5a1e .card{margin-bottom:0}
 .nd-d0c748{font-size:12px;color:var(--warning);margin-bottom:12px}
-.nd-f6ebab{font-size:11px;color:var(--text)}
 .nd-f90a4f{font-size:11px;color:var(--primary)}
-.nd-fc84e9{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
+.nd-fc84e9{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px 12px;margin-bottom:12px}
+/* v1.3.7 - the right of a card's header: its two controls, and under them what the newest scan was */
+.nd-side{display:flex;flex-direction:column;align-items:flex-end;gap:6px;margin-left:auto}
+.nd-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .nd-num22{font-size:22px;font-weight:700}
 .nd-c-warn{color:var(--warning)}
 .nd-c-ok{color:var(--success)}
 .nd-c-muted{color:var(--text-muted)}
+{% if first_run %}
+/* v1.3.7 - the first-run card, shown until a subnet has been scanned */
+.first-run h3{font-size:15px;margin-bottom:12px}
+.first-run ol{padding-left:22px}
+.first-run li{margin-bottom:10px;line-height:1.6}
+.first-run li:last-child{margin-bottom:0}
+{% endif %}
 </style>
 
 {% if ipv6_enabled %}
@@ -72,6 +81,20 @@
 </div>
 {% endif %}
 
+{% if first_run %}
+{# v1.3.7 - no subnet on this page has been scanned yet: the first steps, above the subnets they are taken on #}
+<div class="card first-run">
+    <h3>Getting started</h3>
+    <ol>
+        <li>Press <strong>Scan Now</strong> on a subnet below.
+            {% if not can_write %}<span class="muted">Scanning needs an admin.</span>
+            {% elif not scanner_ok %}<span class="muted">The button appears once nmap is installed on the Jen host; the notice above says how.</span>{% endif %}</li>
+        <li>Discovery then checks every host it found against Kea's leases and reservations, the subnet's gateway, DNS, Kea and Jen addresses, IPAM Lite's entries, the devices Jen has seen and your known list, and calls what is left unknown.</li>
+        <li>Its "Rogue Device" alert is sent for an unknown device the previous scan had not seen. Where it goes is set under {% if can_write %}<a href="/settings/alerts">Settings - Alerts</a>{% else %}Settings - Alerts{% endif %}.</li>
+    </ol>
+</div>
+{% endif %}
+
 <div class="nd-cd5a1e">
 {% for subnet_id, info in subnet_map.items() %}
 {% set last = scan_summary.get(subnet_id, {}) %}
@@ -82,17 +105,34 @@
             <div class="nd-6ae05f">{{ info.name }}</div>
             <div class="nd-865c33">{{ info.cidr }}</div>
         </div>
-        {% if last.get('status') == 'running' %}
-        <span class="nd-f90a4f" id="status-{{ subnet_id }}">{{ icon("hourglass") }} Scanning…</span>
-        {% elif last.get('status') == 'queued' %}
-        <span class="nd-749148" id="status-{{ subnet_id }}">{{ icon("hourglass") }} Queued</span>
-        {% elif last.get('status') == 'done' %}
-        <span class="nd-a6ea14">✓ Done</span>
-        {% elif last.get('status') == 'error' %}
-        <span class="nd-09bfd1" title="{{ last.get('error') or '' }}">✗ Error</span>
-        {% else %}
-        <span class="nd-749148">Never scanned</span>
-        {% endif %}
+        {# v1.3.7 - Scan Now and View Results sit here, at the right of the card's header; they were a row under the
+           numbers. While a scan of this subnet is queued or running the card says so in their place. #}
+        <div class="nd-side">
+            {% if last.get('status') == 'running' %}
+            <span class="nd-f90a4f" id="status-{{ subnet_id }}">{{ icon("hourglass") }} Scanning…</span>
+            {% elif last.get('status') == 'queued' %}
+            <span class="nd-749148" id="status-{{ subnet_id }}">{{ icon("hourglass") }} Queued</span>
+            {% else %}
+            <div class="nd-actions">
+                {% if can_write and scanner_ok and not scope %}
+                <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}" class="nd-cccfa4">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-sm btn-primary">{{ icon("search") }} Scan Now</button>
+                </form>
+                {% endif %}
+                {% if last.get('status') in ('done', 'error') %}
+                <a href="{{ url_for('network_discovery.results', subnet_id=subnet_id) }}" class="btn btn-sm btn-secondary">View Results</a>
+                {% endif %}
+            </div>
+            {% if last.get('status') == 'done' %}
+            <span class="nd-749148">Last scan {{ last.finished_at | utcfmt if last.finished_at else '—' }}: {{ last.hosts_found }} host{{ '' if last.hosts_found == 1 else 's' }}</span>
+            {% elif last.get('status') == 'error' %}
+            <span class="nd-09bfd1" title="{{ last.get('error') or '' }}">✗ Error</span>
+            {% else %}
+            <span class="nd-749148">Never scanned</span>
+            {% endif %}
+            {% endif %}
+        </div>
     </div>
 
     {% if scope %}
@@ -102,16 +142,8 @@
     {% if last.get('status') == 'done' %}
     <div class="nd-775b16">
         <div class="nd-91a870">
-            <div class="nd-7971e4">{{ last.hosts_found }}</div>
-            <div class="nd-749148">Hosts found</div>
-        </div>
-        <div class="nd-91a870">
             <div class="nd-num22 {{ 'nd-c-warn' if last.rogue_count > 0 else 'nd-c-ok' }}">{{ last.rogue_count }}</div>
             <div class="nd-749148">Unknown</div>
-        </div>
-        <div class="nd-91a870">
-            <div class="nd-749148">Last scan</div>
-            <div class="nd-f6ebab">{{ last.finished_at | utcfmt if last.finished_at else '—' }}</div>
         </div>
     </div>
     {% elif last.get('status') == 'error' %}
@@ -139,18 +171,6 @@
     </script>
     {% endif %}
 
-    <div class="nd-58703f">
-        {% if last.get('status') in ('done', 'error') %}
-        <a href="{{ url_for('network_discovery.results', subnet_id=subnet_id) }}" class="btn btn-sm btn-secondary">View Results</a>
-        {% endif %}
-        {% if can_write and scanner_ok and last.get('status') not in ('running', 'queued') and not scope %}
-        <form method="POST" action="{{ url_for('network_discovery.start_scan', subnet_id=subnet_id) }}" class="nd-cccfa4">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm btn-primary">{% if last.get('status') %}{{ icon("refresh-cw") }} Re-scan{% else %}{{ icon("search") }} Scan Now{% endif %}</button>
-        </form>
-        {% endif %}
-    </div>
-
     {% if is_superadmin and not scope %}
     <form method="POST" action="{{ url_for('network_discovery.set_schedule', subnet_id=subnet_id) }}" class="nd-834227">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -160,7 +180,7 @@
             <option value="{{ h }}" {% if schedules.get(subnet_id, 0) == h %}selected{% endif %}>{% if h == 0 %}off{% elif h == 168 %}week{% else %}{{ h }} h{% endif %}</option>
             {% endfor %}
         </select>
-        <button type="submit" class="btn btn-sm btn-secondary">Save</button>
+        <button type="submit" class="btn btn-sm btn-secondary">Save Schedule</button>
     </form>
     {% elif schedules.get(subnet_id, 0) %}
     <div class="nd-3244fd">{{ icon("timer") }} scheduled every {{ schedules.get(subnet_id) }} h</div>

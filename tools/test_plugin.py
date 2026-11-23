@@ -1189,7 +1189,7 @@ def main():
         viewer_results = render_results(False, False)
         admin_results = render_results(True, True)
         for marker, what in (
-            ("/network_discovery.start_scan", "the Re-scan form"),
+            ("/network_discovery.start_scan", "the Scan Now form"),
             ("/reservations/add?", "the Create Reservation link"),
             ("/network/ipam/subnet/kea/1", "the IPAM entry link"),
             ("/network_discovery.mark_known", "the Known / Forget forms"),
@@ -1204,7 +1204,7 @@ def main():
         )
         check(
             "/network_discovery.start_scan" not in render_results(False, True),
-            "results.html: Re-scan follows can_write alone (can_change_known does not bring it back)",
+            "results.html: Scan Now follows can_write alone (can_change_known does not bring it back)",
         )
 
         def render_index(can_write, is_super):
@@ -1224,7 +1224,7 @@ def main():
         check(
             "/network_discovery.start_scan" not in render_index(False, False)
             and "/network_discovery.set_schedule" not in render_index(False, False),
-            "index.html as a viewer: no Scan Now / Re-scan form and no schedule form",
+            "index.html as a viewer: no Scan Now form and no schedule form",
         )
         check(
             "/network_discovery.results" in render_index(False, False),
@@ -1233,12 +1233,12 @@ def main():
         check(
             "/network_discovery.start_scan" in render_index(True, False)
             and "/network_discovery.set_schedule" not in render_index(True, False),
-            "index.html as an admin: Re-scan is there, the schedule form is not (superadmin only)",
+            "index.html as an admin: Scan Now is there, the schedule form is not (superadmin only)",
         )
         check(
             "/network_discovery.start_scan" in render_index(True, True)
             and "/network_discovery.set_schedule" in render_index(True, True),
-            "index.html as a superadmin: Re-scan and the schedule form are both there",
+            "index.html as a superadmin: Scan Now and the schedule form are both there",
         )
 
     # ── 1.3.5 (ND-1): a read that FAILS is not "nothing there" for a scan ─────────────────────────────────────────────
@@ -1578,6 +1578,310 @@ def main():
         raised == "Jen's devices table" and raised == raised_loader,
         f"_devices_readable: a failure has the name `_load_devices` gives it (got {raised!r}, {raised_loader!r})",
     )
+
+    # ── 1.3.7: the Discovery page's Getting started card (the real index route; only the database is stood in) ─────────
+    w = load_plugin()
+    _stub_jen_plugin_api()
+    w.render_template = lambda name, **kw: kw
+    w.url_for = lambda *a, **k: "/x"
+    w._schedules = dict
+    w._load_known = lambda strict=False: {}
+    w._nmap_available = lambda: True
+    two = {1: {"name": "lan", "cidr": "10.0.0.0/24"}, 2: {"name": "lab", "cidr": "10.0.1.0/24"}}
+    w._accessible_subnets = lambda: dict(two)
+
+    def _job(status, **more):
+        row = {"id": 9, "status": status, "started_at": None, "finished_at": None, "hosts_found": 0, "rogue_count": 0}
+        return dict(row, error=None, **more)
+
+    def _jobs(by_subnet):
+        """A database whose newest job per subnet is `by_subnet[subnet_id]` (none when the subnet is not in it)."""
+
+        def answer(sql, params):
+            if "FROM nd_scan_jobs j WHERE j.subnet_id=%s" in sql:
+                return by_subnet.get(params[0])
+            if "FROM nd_scan_results WHERE job_id=%s" in sql:
+                return [
+                    {"ip": "10.0.0.5", "mac": "", "status": "lease", "rogue": 0},
+                    {"ip": "10.0.0.6", "mac": "", "status": "unknown", "rogue": 1},
+                ]
+            return []
+
+        return FakeDB(answer)
+
+    def discovery_page(by_subnet, subnets=None):
+        w._accessible_subnets = lambda: dict(two if subnets is None else subnets)
+        w._get_db = lambda: _jobs(by_subnet)
+        return w.index()
+
+    page = discovery_page({})
+    check(
+        page.get("first_run") is True,
+        f"index: no subnet has a scan job, so it is a first run (got {page.get('first_run')})",
+    )
+    for status in ("done", "error", "running", "queued"):
+        got = discovery_page({2: _job(status)}).get("first_run")
+        check(got is False, f"index: one subnet with a {status} job and it is not a first run (got {got})")
+    check(discovery_page({}, subnets={}).get("first_run") is False, "index: no subnet to scan, so no first-run card")
+
+    def _db_away():
+        raise RuntimeError(2013, "Lost connection to MySQL server during query")
+
+    w._get_db = _db_away
+    w._accessible_subnets = lambda: dict(two)
+    page = w.index()
+    check(
+        page.get("first_run") is False and page["scan_summary"] == {},
+        f"index: scan jobs that could not be read are not 'never scanned': no first-run card (got {page.get('first_run')})",
+    )
+    done = discovery_page({1: _job("done", finished_at="2026-11-21 14:02", hosts_found=7)})["scan_summary"][1]
+    check(
+        done["finished_at"] == "2026-11-21 14:02" and done["hosts_found"] == 2 and done["rogue_count"] == 1,
+        f"index: the time and the host count the card's header prints are what the route already loads (got {done})",
+    )
+
+    # ── 1.3.7: the pages (V30 and the look-over's rows on plugin pages) ────────────────────────────────────────────────
+    index_page = pathlib.Path(ROOT, "templates", "network_discovery", "index.html").read_text(encoding="utf-8")
+    results_page = pathlib.Path(ROOT, "templates", "network_discovery", "results.html").read_text(encoding="utf-8")
+    check(
+        "Re-scan" not in index_page and "Re-scan" not in results_page,
+        "both pages: the button has one label, Scan Now",
+    )
+    side = index_page[index_page.find('<div class="nd-side">') : index_page.find("{% if scope %}")]
+    side = side if '<div class="nd-side">' in side else ""
+
+    def in_order(text, *needles):
+        """Every needle is in `text`, each first found after the one before it."""
+        at = [text.find(n) for n in needles]
+        return -1 not in at and at == sorted(at) and len(set(at)) == len(at)
+
+    check(
+        "url_for('network_discovery.start_scan', subnet_id=subnet_id)" in side
+        and 'name="csrf_token"' in side
+        and "{% if can_write and scanner_ok and not scope %}" in side
+        and '{{ icon("search") }} Scan Now</button>' in side
+        and index_page.count("network_discovery.start_scan") == 1,
+        "index.html: each card's header holds the one Scan Now form, to the scan route, for an account that may scan",
+    )
+    check(
+        "url_for('network_discovery.results', subnet_id=subnet_id)" in side
+        and ">View Results</a>" in side
+        and "Last scan {{ last.finished_at | utcfmt if last.finished_at else '—' }}: {{ last.hosts_found }} host"
+        in side
+        and index_page.count("network_discovery.results") == 1,
+        "index.html: View Results is in the header too, with the last scan's time and host count under it",
+    )
+    check(
+        in_order(side, "last.get('status') == 'running'", "{% else %}", "network_discovery.start_scan")
+        and "Scanning…" in side
+        and "Queued" in side,
+        "index.html: while a scan is queued or running the card says so and draws no Scan Now",
+    )
+    check(
+        ">Save Schedule</button>" in index_page and ".nd-cd5a1e .card{margin-bottom:0}" in index_page,
+        "index.html: the schedule's button names what it saves, and the cards are 16px apart both ways",
+    )
+    check(
+        "{% if first_run %}\n{# " in index_page
+        and '<div class="card first-run">\n    <h3>Getting started</h3>\n    <ol>' in index_page
+        and index_page.count("<li>") == 3
+        and "<li>Press <strong>Scan Now</strong> on a subnet below." in index_page,
+        "index.html: one first-run card, headed Getting started, whose first step is Scan Now on a subnet",
+    )
+    check(
+        "Discovery then checks every host it found against Kea's leases and reservations, the subnet's gateway, DNS, Kea "
+        "and Jen addresses, IPAM Lite's entries, the devices Jen has seen and your known list, and calls what is left "
+        "unknown."
+        in index_page
+        and 'Its "Rogue Device" alert is sent for an unknown device the previous scan had not seen.' in index_page
+        and '<a href="/settings/alerts">Settings - Alerts</a>' in index_page,
+        "index.html: step 2 says what Discovery does by itself and step 3 where its alert is set",
+    )
+    plugin_text = pathlib.Path(ROOT, "plugin.py").read_text(encoding="utf-8")
+    check(
+        'label="Rogue Device",' in plugin_text
+        and all(f'"{s}"' in plugin_text for s in ("lease", "reservation", "infrastructure", "ipam", "device", "known")),
+        "and the alert's name and the six things a host is checked against are the ones plugin.py has",
+    )
+    check(
+        "<p>Scans a subnet, matches every host it finds against what Jen already knows, and reports the ones nothing "
+        "accounts for as unknown.</p>"
+        in index_page
+        and "before calling anything unknown" not in index_page,
+        "index.html: the line under the title is one plain sentence",
+    )
+    first_element = results_page[results_page.index("{% block content %}") :].split("\n")[1]
+    check(
+        first_element
+        == """<a class="back-link" href="{{ url_for('network_discovery.index') }}">&larr; Network Discovery</a>"""
+        and results_page.count("url_for('network_discovery.index')") == 1
+        and "← Back" not in results_page,
+        f"results.html: one way back, the first element of the page, named after the Discovery page (got {first_element!r})",
+    )
+    check(
+        ".back-link { display: inline-block; margin-bottom: 8px; font-size: 13px; }" in results_page
+        and "{% block content_class %}content--wide{% endblock %}" in results_page
+        and "content_class" not in index_page,
+        "results.html: the back link's style, and the results table may use a wide page",
+    )
+    check(
+        "{% if can_write %}No scan data yet. Press Scan Now to run the first scan.{% else %}No scan data yet.{% endif %}"
+        in results_page
+        and "Run a scan from the Discovery page" not in results_page
+        and '{{ icon("search") }} Scan Now</button>' in results_page,
+        "results.html: the empty page names the button that is on it, and only to an account that has the button",
+    )
+    check(
+        "{% if job and hosts %}<a href=\"{{ url_for('network_discovery.export_results', subnet_id=subnet_id) }}\""
+        in results_page
+        and "Export CSV</a>" in results_page
+        and "Mark Known</button>" in results_page
+        and "Forget Host</button>" in results_page,
+        "results.html: no export link with nothing to export, and the buttons name what they act on",
+    )
+    manifest_text = pathlib.Path(ROOT, "manifest.json").read_text(encoding="utf-8")
+    check(
+        "Needs nmap on the Jen host: the Docker image has it, a systemd install can add it from Settings - Plugins, and "
+        'anywhere else you install it yourself.",'
+        in manifest_text
+        and "can install it)" not in manifest_text,
+        "manifest.json: the description says where nmap comes from on each kind of install, and promises no more",
+    )
+
+    if jinja2 is not None:
+        env3 = jinja2.Environment(
+            loader=jinja2.DictLoader(
+                {
+                    "base.html": "{% block title %}{% endblock %}{% block content %}{% endblock %}",
+                    "_investigate.html": macro,
+                    "results.html": results_page,
+                    "index.html": index_page,
+                }
+            ),
+            autoescape=True,
+        )
+        env3.filters["utcfmt"] = lambda v: str(v)
+        env3.globals.update(
+            icon=lambda *a, **k: "[icon]",
+            csrf_token=lambda: "t",
+            url_for=lambda endpoint, **k: "/" + endpoint,
+            csp_nonce="n",
+            ipv6_enabled=False,
+        )
+
+        def card(last, can_write=True, scanner_ok=True, scope=None, first_run=False):
+            return env3.get_template("index.html").render(
+                subnet_map={1: {"name": "lan", "cidr": "10.0.0.0/24"}},
+                scan_summary={1: last},
+                schedules={},
+                schedule_choices=[0, 6, 24],
+                scope_errors={1: scope} if scope else {},
+                scanner_ok=scanner_ok,
+                can_install_nmap=False,
+                is_superadmin=False,
+                can_write=can_write,
+                first_run=first_run,
+                plugin_id="network-discovery",
+            )
+
+        finished = {"status": "done", "hosts_found": 3, "rogue_count": 1, "finished_at": "2026-11-21 14:02"}
+        page = card(finished)
+        check(
+            "Last scan 2026-11-21 14:02: 3 hosts</span>" in page
+            and in_order(page, "Scan Now", "View Results", "Last scan", "Unknown</div>")
+            and "Hosts found" not in page,
+            "index.html, a finished scan: Scan Now, View Results and 'Last scan <time>: N hosts' in the header, said once",
+        )
+        check(
+            "Last scan 2026-11-21 14:02: 1 host</span>" in card(dict(finished, hosts_found=1)),
+            "index.html: one host is '1 host'",
+        )
+        never = card({})
+        check(
+            "/network_discovery.start_scan" in never
+            and "View Results" not in never
+            and "Never scanned" in never
+            and "Last scan" not in never,
+            "index.html, never scanned: Scan Now, no View Results link to an empty page, no last scan",
+        )
+        for status, words in (("running", "Scanning…"), ("queued", "Queued")):
+            page = card({"status": status})
+            check(
+                "/network_discovery.start_scan" not in page and words in page and "View Results" not in page,
+                f"index.html, a {status} scan: no Scan Now button, and the card says {words}",
+            )
+        failed = card({"status": "error", "error": "timed out"})
+        check(
+            "/network_discovery.start_scan" in failed and "View Results" in failed and "timed out" in failed,
+            "index.html, a failed scan: Scan Now and View Results, and the reason",
+        )
+        check(
+            "/network_discovery.start_scan" not in card({}, scanner_ok=False)
+            and "/network_discovery.start_scan" not in card({}, scope="too large")
+            and "/network_discovery.start_scan" not in card({}, can_write=False),
+            "index.html: no Scan Now without nmap, on a subnet too large to scan, or for a viewer (the route refuses each)",
+        )
+        fresh = card({}, first_run=True)
+        check(
+            '<div class="card first-run">' in fresh
+            and in_order(fresh, '<div class="card first-run">', '<div class="nd-cd5a1e">')
+            and '<a href="/settings/alerts">Settings - Alerts</a>' in fresh
+            and "first-run" not in card(finished),
+            "index.html: the first-run card is above the subnet cards, and gone once a subnet has been scanned",
+        )
+        viewer_fresh = card({}, can_write=False, first_run=True)
+        check(
+            "Scanning needs an admin." in viewer_fresh and 'href="/settings/alerts"' not in viewer_fresh,
+            "index.html as a viewer on a first run: the steps, and no link a viewer is refused",
+        )
+        check(
+            "The button appears once nmap is installed on the Jen host; the notice above says how."
+            in card({}, scanner_ok=False, first_run=True),
+            "index.html on a first run without nmap: step 1 says why no card has the button",
+        )
+
+        def results_of(job, hosts, can_write):
+            return env3.get_template("results.html").render(
+                subnet={"name": "lan", "cidr": "10.0.0.0/24"},
+                subnet_id=1,
+                job=job,
+                newer_job=None,
+                statuses=["unknown"],
+                counts={"unknown": len(hosts)},
+                status_icons={"unknown": "x"},
+                status_labels={"unknown": "Unknown"},
+                can_change_known=can_write,
+                can_write=can_write,
+                ipam_installed=False,
+                appeared=[],
+                gone=[],
+                hosts=hosts,
+            )
+
+        empty_admin, empty_viewer = results_of(None, [], True), results_of(None, [], False)
+        check(
+            "No scan data yet. Press Scan Now to run the first scan." in empty_admin
+            and "[icon] Scan Now</button>" in empty_admin
+            and "export_results" not in empty_admin,
+            "results.html with no scan, as an admin: the sentence names the Scan Now button, which is on the page",
+        )
+        check(
+            "No scan data yet." in empty_viewer and "Scan Now" not in empty_viewer,
+            "results.html with no scan, as a viewer: the sentence alone, and no button",
+        )
+        one = [{"ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:05", "status": "unknown", "hostname": "", "label": ""}]
+        full = results_of({"status": "done", "finished_at": None}, one, True)
+        check(
+            full.count('class="back-link"') == 1
+            and in_order(full, 'class="back-link"', "page-header")
+            and "[icon] Export CSV</a>" in full
+            and "[icon] Mark Known</button>" in full,
+            "results.html with a host: the back link above the title, Export CSV and Mark Known",
+        )
+        check(
+            "export_results" not in results_of({"status": "done", "finished_at": None}, [], True),
+            "results.html for a scan that found no host: no export link",
+        )
 
     if failures:
         print(f"\n{len(failures)} check(s) failed")

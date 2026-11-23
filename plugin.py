@@ -1156,6 +1156,13 @@ def _scheduled_tick():
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 
+def _first_run(subnet_map, scan_summary, jobs_read):
+    """Pure. v1.3.7 - whether the Discovery page shows its Getting started card: there is a subnet on the page, the scan
+    jobs were read, and not one of those subnets has a job of any status. A page whose jobs could not be read shows no
+    card: "never scanned" and "could not ask" are two answers. It asks nothing new of the database."""
+    return bool(jobs_read and subnet_map and not any(scan_summary.get(sid) for sid in subnet_map))
+
+
 @bp.route("/")
 @login_required
 def index():
@@ -1163,6 +1170,7 @@ def index():
     scan_summary = {}
     schedules = _schedules()
     db = None
+    jobs_read = False
     try:
         db = _get_db()
         with db.cursor() as cur:
@@ -1187,6 +1195,7 @@ def index():
                     row["rogue_count"] = sum(1 for r in rows if r["status"] == "unknown")
                 scan_summary[sid] = row or {}
         db.commit()
+        jobs_read = True
     except Exception as e:
         logger.error(f"Network Discovery index error: {e}")
     finally:
@@ -1197,6 +1206,7 @@ def index():
         "network_discovery/index.html",
         subnet_map=subnet_map,
         scan_summary=scan_summary,
+        first_run=_first_run(subnet_map, scan_summary, jobs_read),
         schedules=schedules,
         schedule_choices=_SCHEDULE_CHOICES,
         scope_errors={sid: scan_scope_error(info["cidr"]) for sid, info in subnet_map.items()},

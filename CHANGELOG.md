@@ -1,5 +1,35 @@
 # Network Discovery Plugin — Changelog
 
+## [1.3.7] - 2026-11-22
+
+The changes to Discovery's two pages and to its description that came out of the look over Jen's pages on 7.2.0-beta.5 (V30, V52, V54, and that report's additions 4 and 11). No scan, classification or alert logic changed. `requires_jen` (5.68.0), `plugin_api` (3) and every migration are unchanged.
+
+### Changed: Scan Now and View Results are in each card's header, under one label (V30, addition 11)
+
+The results page of a subnet that had never been scanned said *No scan data yet. Run a scan from the Discovery page.* while it carried a scan button of its own, named **Re-scan**, which is the wrong word before a first scan. The Discovery page it pointed to did have the button, at the bottom of each subnet's card under the numbers, named **Scan Now** before a first scan and **Re-scan** after one. On a host where nmap is missing no card draws the button, which is how the look-over came to report that the page has none.
+
+The button is now **Scan Now** on both pages and at every time. On the Discovery page it sits at the right of each subnet card's header with **View Results** beside it, and under them the card says what the last scan was: *Last scan 2026-11-21 14:02 UTC: 37 hosts*, *Never scanned*, or that the scan failed. The card's body keeps the count of unknown hosts; the host count and the time are no longer printed a second time there. While a scan of that subnet is queued or running the header says so and has no Scan Now button, as before. The button is drawn for the accounts and in the states the scan route accepts, as before: an admin, with nmap present, on a subnet that is not too large to scan. View Results is drawn once a scan has finished or failed, also as before.
+
+The results page's empty state names the button that is on it: *No scan data yet. Press Scan Now to run the first scan.* A viewer, who has no such button, reads *No scan data yet.*
+
+### Added: the Discovery page says what to do first (addition 11)
+
+Until one of the subnets on the page has been scanned, the page opens with a **Getting started** card of three steps: press Scan Now on a subnet; what Discovery then does by itself, which is to check every host it found against Kea's leases and reservations, the subnet's gateway, DNS, Kea and Jen addresses, IPAM Lite's entries, the devices Jen has seen and your known list, and to call what is left unknown; and that its "Rogue Device" alert, sent for an unknown device the previous scan had not seen, is set under Settings - Alerts, with a link for an admin. On a host without nmap, step 1 says that the button appears once nmap is installed; a viewer is told that scanning needs an admin.
+
+The card goes away with the first scan job of any subnet on the page, whatever that job's state. It is decided from what the page had already read. If the scan jobs could not be read, the card is not shown: jobs that could not be asked for are not taken for no jobs.
+
+The line under the page's title was *Scan subnets and account for every device on them — Kea, infrastructure, IPAM, the devices Jen has seen — before calling anything unknown.* It now reads *Scans a subnet, matches every host it finds against what Jen already knows, and reports the ones nothing accounts for as unknown.*
+
+### Fixed: the description no longer promises that Settings can install nmap everywhere (V30)
+
+The plugin's description ended *Needs nmap on the Jen host (Settings → Plugins can install it).* That is true on a systemd install only, where the Plugin Manager shows a superadmin an Install nmap button that hands the request to Jen's root-run plugin service. On any other host the Plugin Manager shows the command `sudo apt install nmap` and installs nothing, and Jen's Docker image has had nmap in it since Jen 5.65.10. The description now ends *Needs nmap on the Jen host: the Docker image has it, a systemd install can add it from Settings - Plugins, and anywhere else you install it yourself.* The notice on the Discovery page already said the right thing for each host and is unchanged.
+
+### Changed: one way back from the results page, room for its table, labels and gaps (addition 4, V54, V52)
+
+The results page had a **← Back** button in its row of buttons. It now has one link back, **← Network Discovery**, as its first element above the title, and the button is gone. The page tells Jen that it is a table page: Jen 7.2.0-beta.6 lets such a page grow to 1,800 px on a wide monitor, and an older Jen ignores the request.
+
+Button labels are Title Case and name what they act on: **Export CSV** (was *CSV*), **Mark Known** (was *Known*), **Forget Host** (was *Forget*) and, on the Discovery page, **Save Schedule** (was *Save*). The export link is not drawn for a scan that found no host. On the Discovery page the rows of subnet cards were 32 px apart and the columns 16 px, because each card brought Jen's own 16 px bottom margin on top of the grid's gap; the gap is now 16 px both ways.
+
 ## [1.3.6] - 2026-11-21
 
 One fix and one limit written down, both from the executing pass on Jen 7.2.0-beta.4 (BG3, BG5). `requires_jen` (5.68.0), `plugin_api` (3) and every migration are unchanged.
